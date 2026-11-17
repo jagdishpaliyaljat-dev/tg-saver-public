@@ -22,17 +22,11 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-API_ID = int(os.environ.get("API_ID", "28220028"))
-API_HASH = os.environ.get("API_HASH", "2644b27a6f3bff5dea5d09e657b01a5f")
-raw_session = os.environ.get("SESSION_STRING", "").strip()
+API_ID = 28220028
+API_HASH = "2644b27a6f3bff5dea5d09e657b01a5f"
 
-if not raw_session:
-    print("ERROR: SESSION_STRING environment variable is missing! Please set SESSION_STRING in cloud settings.")
-    import time
-    while True:
-        time.sleep(3600)
+raw_session = "AQGumnwApofV6x8AURQDcalOpweXjIpV4ADbnie6FX3UuZvNSf79ANF0XavKZUXduAw6ZQ9yI9LasbNtt5afR85n3HPns4-Dttx-ZLPeFmrwkPYysOoDtw7uIjptH-D7G3szqYEyndvYgfVi6UNYY0Uk4UzCSogm_AAYTpJUMBzQWjjYZ1Tp_3UeCcWlYkUMElq3N-Zd-6Y4s6NlT639n51tksdEn_I8rFZedL1yWx8vvZZ-nWGkOYwAn9KmQHoYQcefZomXvj5zbcdmJ2_SkGC0vJRa0Pq_aoOuQrA5P6detlgbT_ii2yC0OQ7vlF5s-jzRxsvG2I_nHUzHZVJdSnoR7ee8qwAAAAHeUpBIAA".strip()
 
-# Auto-fix 270 vs 271 bytes truncation
 pad = '=' * (-len(raw_session) % 4)
 decoded = base64.urlsafe_b64decode(raw_session + pad)
 if len(decoded) == 270:
@@ -40,11 +34,11 @@ if len(decoded) == 270:
 else:
     SESSION_STRING = raw_session
 
-SOURCE_CHAT = int(os.environ.get("SOURCE_CHAT", "-1003863573134"))
-DESTINATION_CHAT = int(os.environ.get("DESTINATION_CHAT", "-1004406877280"))
+SOURCE_CHAT = -1003863573134
+DESTINATION_CHAT = -1004406877280
 
-START_MSG_ID = int(os.environ.get("START_MSG_ID", "1"))
-END_MSG_ID = int(os.environ.get("END_MSG_ID", "3572"))
+START_MSG_ID = 1
+END_MSG_ID = 3572
 
 app = Client("koyeb_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
