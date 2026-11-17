@@ -5,6 +5,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 
+PORT = int(os.environ.get("PORT", "8080"))
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -14,7 +16,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def run_health_server():
-    server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
+    server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
     server.serve_forever()
 
 threading.Thread(target=run_health_server, daemon=True).start()
