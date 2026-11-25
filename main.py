@@ -1,12 +1,20 @@
 import os
 import re
+import math
 import base64
 import asyncio
 import threading
 import aiohttp
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from pyrogram import Client
+from pyrogram import Client, raw
 from pyrogram.errors import FloodWait
+
+try:
+    import uvloop
+    uvloop.install()
+    print("🚀 uvloop fast event loop installed!")
+except ImportError:
+    pass
 
 # --- Render Port & Health Server ---
 PORT = int(os.environ.get("PORT", "8080"))
@@ -170,7 +178,74 @@ async def get_target_message_safe(chat_id, msg_id):
         return await user_app.get_messages(chat_id, msg_id)
 
 
-# Bulletproof Media Upload with Fast HTTP and Live Progress
+# --- 6X Ultra Fast Parallel Uploader Engine ---
+async def fast_upload_file(client, file_path, progress_cb=None):
+    file_size = os.path.getsize(file_path)
+    part_size = 512 * 1024  # 512 KB standard MTProto part size
+    total_parts = math.ceil(file_size / part_size)
+    is_big = file_size > 10 * 1024 * 1024
+    file_id = client.rnd_id()
+
+    semaphore = asyncio.Semaphore(6)  # 6 Parallel Upload Connections!
+    uploaded_bytes = 0
+
+    async def upload_part(part_index, chunk):
+        nonlocal uploaded_bytes
+        async with semaphore:
+            for attempt in range(3):
+                try:
+                    if is_big:
+                        await client.invoke(
+                            raw.functions.upload.SaveBigFilePart(
+                                file_id=file_id,
+                                file_part=part_index,
+                                file_total_parts=total_parts,
+                                bytes=chunk
+                            )
+                        )
+                    else:
+                        await client.invoke(
+                            raw.functions.upload.SaveFilePart(
+                                file_id=file_id,
+                                file_part=part_index,
+                                bytes=chunk
+                            )
+                        )
+                    uploaded_bytes += len(chunk)
+                    if progress_cb:
+                        await progress_cb(uploaded_bytes, file_size)
+                    break
+                except FloodWait as fw:
+                    await asyncio.sleep(fw.value + 1)
+                except Exception as part_err:
+                    if attempt == 2:
+                        raise part_err
+                    await asyncio.sleep(1)
+
+    tasks = []
+    with open(file_path, "rb") as f:
+        for part_index in range(total_parts):
+            chunk = f.read(part_size)
+            tasks.append(upload_part(part_index, chunk))
+
+    await asyncio.gather(*tasks)
+
+    if is_big:
+        return raw.types.InputFileBig(
+            id=file_id,
+            parts=total_parts,
+            name=os.path.basename(file_path)
+        )
+    else:
+        return raw.types.InputFile(
+            id=file_id,
+            parts=total_parts,
+            name=os.path.basename(file_path),
+            md5_checksum=""
+        )
+
+
+# Bulletproof Media Upload with Fast HTTP, 6X Parallel MTProto and Live Progress
 async def upload_media_file(session: aiohttp.ClientSession, target_chat_id: int, file_path: str, media_type: str, caption: str, thumb_file: str, status_msg_id: int, user_chat_id: int):
     file_size = os.path.getsize(file_path)
     file_size_mb = file_size / (1024 * 1024)
@@ -207,11 +282,11 @@ async def upload_media_file(session: aiohttp.ClientSession, target_chat_id: int,
                     print("✅ Fast HTTP Bot API upload succeeded!")
                     return True
                 else:
-                    print(f"HTTP upload non-ok: {res_data}. Trying Pyrogram...")
+                    print(f"HTTP upload non-ok: {res_data}. Trying Pyrogram 6X Parallel...")
         except Exception as http_err:
-            print(f"HTTP upload error: {http_err}. Trying Pyrogram...")
+            print(f"HTTP upload error: {http_err}. Trying Pyrogram 6X Parallel...")
 
-    # Strategy 2: Pyrogram Upload with Live Progress Bar (for files up to 2 GB)
+    # Strategy 2: Ultra Fast 6-Worker Parallel MTProto Upload (up to 2 GB)
     last_update = [0]
     async def progress_cb(current, total):
         now = asyncio.get_event_loop().time()
@@ -221,41 +296,40 @@ async def upload_media_file(session: aiohttp.ClientSession, target_chat_id: int,
             c_mb = current / (1024 * 1024)
             t_mb = total / (1024 * 1024)
             if status_msg_id:
-                try:
-                    await edit_text_msg(
-                        session,
-                        user_chat_id,
-                        status_msg_id,
-                        f"📤 **Uploading:** `{pct}%` (`{c_mb:.1f} MB / {t_mb:.1f} MB`)\n\n✋ *Rukne ke liye /stop likhein.*"
-                    )
-                except Exception:
-                    pass
+                # Non-blocking async edit
+                asyncio.create_task(edit_text_msg(
+                    session,
+                    user_chat_id,
+                    status_msg_id,
+                    f"⚡ **Fast 6X Uploading:** `{pct}%` (`{c_mb:.1f} MB / {t_mb:.1f} MB`)\n\n✋ *Rukne ke liye /stop likhein.*"
+                ))
 
     client_to_use = bot_app if (bot_app and bot_app.is_connected) else user_app
     try:
+        # Fast 6-Worker parallel chunk upload
+        input_file = await fast_upload_file(client_to_use, file_path, progress_cb=progress_cb)
+
+        if media_type == "video":
+            await client_to_use.send_video(target_chat_id, video=input_file, caption=caption, thumb=thumb_file)
+        elif media_type == "document":
+            await client_to_use.send_document(target_chat_id, document=input_file, caption=caption, thumb=thumb_file)
+        elif media_type == "photo":
+            await client_to_use.send_photo(target_chat_id, photo=input_file, caption=caption)
+        elif media_type == "audio":
+            await client_to_use.send_audio(target_chat_id, audio=input_file, caption=caption)
+        elif media_type == "voice":
+            await client_to_use.send_voice(target_chat_id, voice=input_file, caption=caption)
+        return True
+    except Exception as fast_err:
+        print(f"Parallel upload warning: {fast_err}. Falling back to standard Pyrogram send...")
+        # Fallback to standard Pyrogram client send
         if media_type == "video":
             await client_to_use.send_video(target_chat_id, video=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
         elif media_type == "document":
             await client_to_use.send_document(target_chat_id, document=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
         elif media_type == "photo":
-            await client_to_use.send_photo(target_chat_id, photo=file_path, caption=caption, progress=progress_cb)
-        elif media_type == "audio":
-            await client_to_use.send_audio(target_chat_id, audio=file_path, caption=caption, progress=progress_cb)
-        elif media_type == "voice":
-            await client_to_use.send_voice(target_chat_id, voice=file_path, caption=caption)
+            await client_to_use.send_photo(target_chat_id, photo=file_path, caption=caption)
         return True
-    except Exception as e:
-        print(f"Primary upload client failed: {e}. Trying fallback client...")
-        alt_client = user_app if client_to_use == bot_app else bot_app
-        if alt_client and alt_client.is_connected:
-            if media_type == "video":
-                await alt_client.send_video(target_chat_id, video=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
-            elif media_type == "document":
-                await alt_client.send_document(target_chat_id, document=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
-            elif media_type == "photo":
-                await alt_client.send_photo(target_chat_id, photo=file_path, caption=caption)
-            return True
-        raise e
 
 
 # --- Handle Incoming Message ---
