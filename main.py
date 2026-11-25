@@ -64,6 +64,15 @@ if len(decoded) == 270:
 else:
     SESSION_STRING = raw_session
 
+# Destination Channel Mapping (User ID -> Target Channel ID)
+default_dest = os.environ.get("DESTINATION_CHAT", "").strip()
+try:
+    DEFAULT_DESTINATION = int(default_dest) if default_dest else None
+except ValueError:
+    DEFAULT_DESTINATION = default_dest
+
+user_destinations = {}  # {user_id: channel_id or channel_title}
+
 # Caption & Thumbnail config
 CUSTOM_FOOTER = os.environ.get("CUSTOM_FOOTER", "")
 TELEGRAM_ID = os.environ.get("TELEGRAM_ID", "")
@@ -137,33 +146,91 @@ async def edit_text_msg(session: aiohttp.ClientSession, chat_id: int, message_id
 # --- Handle Incoming Message ---
 async def handle_message(session: aiohttp.ClientSession, msg: dict):
     chat_id = msg["chat"]["id"]
+    from_user = msg.get("from", {})
+    from_id = from_user.get("id", chat_id)
     text = msg.get("text", "").strip()
-    user_name = msg.get("from", {}).get("first_name", "Friend")
+    user_name = from_user.get("first_name", "Friend")
 
-    status_info["last_activity"] = f"Received message from {user_name} ({chat_id})"
+    status_info["last_activity"] = f"Message from {user_name} ({chat_id})"
     print(f"📩 Incoming from {user_name} ({chat_id}): {text}")
+
+    # Check if a message was forwarded from a channel to set destination
+    if "forward_from_chat" in msg:
+        fwd_chat = msg["forward_from_chat"]
+        if fwd_chat.get("type") in ["channel", "supergroup", "group"]:
+            target_id = fwd_chat["id"]
+            target_title = fwd_chat.get("title", str(target_id))
+            user_destinations[from_id] = target_id
+            await send_text_msg(
+                session,
+                chat_id,
+                f"✅ **Destination Set Ho Gaya!**\n\n"
+                f"📢 **Channel:** `{target_title}`\n"
+                f"🆔 **ID:** `{target_id}`\n\n"
+                f"Ab aap jo bhi restricted link bhejenge, wo seedhe is channel me upload hoga! 🚀"
+            )
+            return
 
     # 1. /start command
     if text.startswith("/start"):
         session_status = "✅ Connected" if status_info["user_connected"] else "⚠️ Disconnected"
+        curr_dest = user_destinations.get(from_id, DEFAULT_DESTINATION)
+        dest_display = f"`{curr_dest}`" if curr_dest else "Private Chat (PM)"
+
         welcome_text = (
             f"👋 **Namaste {user_name}!**\n\n"
             "Main **Save Restricted Content Bot** hoon.\n\n"
-            f"⚡ **User Session Status:** {session_status}\n\n"
-            "📌 **Kaise use karein:**\n"
-            "Mujhe kisi bhi restricted Telegram post ka link bhejo:\n\n"
-            "• **Single post:** `https://t.me/c/3863573134/31`\n"
-            "• **Multiple posts (Range):** `https://t.me/c/3863573134/31-35`\n\n"
-            "Files download hokar bina restriction ke aapko mil jayengi! 🚀"
+            f"⚡ **User Session:** {session_status}\n"
+            f"🎯 **Active Destination:** {dest_display}\n\n"
+            "📌 **Commands:**\n"
+            "• **Link Bhejo:** `https://t.me/c/3863573134/31`\n"
+            "• **Range Bhejo:** `https://t.me/c/3863573134/31-35`\n"
+            "• **Channel me bhejne ke liye:** Bot ko apne channel/group me Admin banayein, ya channel se koi bhi post mujhe Forward karein!\n"
+            "• `/setchat -100xxxxxxxxxx` - Manually channel ID set karein\n"
+            "• `/clearchat` - Wapas private chat me paane ke liye\n"
+            "• `/mychat` - Check karein active destination channel"
         )
         await send_text_msg(session, chat_id, welcome_text)
         return
 
-    # 2. Telegram Link handler
+    # 2. /setchat command
+    if text.startswith("/setchat"):
+        parts = text.split()
+        if len(parts) > 1:
+            try:
+                ch_id = int(parts[1])
+            except ValueError:
+                ch_id = parts[1]
+            user_destinations[from_id] = ch_id
+            await send_text_msg(session, chat_id, f"✅ Destination channel set to: `{ch_id}`!\nAb saari files is channel me upload hongi.")
+        else:
+            await send_text_msg(session, chat_id, "Usage: `/setchat -100xxxxxxxxxx` ya channel se koi post mujhe forward karein.")
+        return
+
+    # 3. /mychat command
+    if text.startswith("/mychat"):
+        curr_dest = user_destinations.get(from_id, DEFAULT_DESTINATION)
+        if curr_dest:
+            await send_text_msg(session, chat_id, f"🎯 Abhi saara content channel `{curr_dest}` me upload ho raha hai.\nPrivate chat me paane ke liye `/clearchat` likhein.")
+        else:
+            await send_text_msg(session, chat_id, "🎯 Abhi content aapki Private Chat (PM) me aa raha hai.\nChannel me bhejne ke liye channel se koi bhi post yahan forward karein.")
+        return
+
+    # 4. /clearchat command
+    if text.startswith("/clearchat"):
+        if from_id in user_destinations:
+            del user_destinations[from_id]
+        await send_text_msg(session, chat_id, "✅ Destination reset ho gaya! Ab files aapki Private Chat me aayengi.")
+        return
+
+    # 5. Telegram Link handler
     if "t.me/" in text:
         if not status_info["user_connected"]:
             await send_text_msg(session, chat_id, "⚠️ User session abhi connect nahi hai. Kripya thoda wait karein ya logs check karein.")
             return
+
+        # Determine target destination (channel/group or private chat)
+        target_destination = user_destinations.get(from_id, DEFAULT_DESTINATION or chat_id)
 
         resp = await send_text_msg(session, chat_id, "⏳ **Link process ho raha hai...**")
         status_msg_id = resp.get("result", {}).get("message_id") if resp else None
@@ -210,37 +277,38 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                         if not file_path:
                             continue
 
+                        dest_label = f"Channel (`{target_destination}`)" if target_destination != chat_id else "Aapki chat"
                         if status_msg_id:
-                            await edit_text_msg(session, chat_id, status_msg_id, "📤 **Aapki chat me upload ho raha hai...**")
+                            await edit_text_msg(session, chat_id, status_msg_id, f"📤 **{dest_label} me upload ho raha hai...**")
 
-                        # Send via Pyrogram bot_app (supports up to 2GB)
+                        # Send to target destination via bot_app (or user_app fallback)
                         try:
                             if target_msg.video:
-                                await bot_app.send_video(chat_id, video=file_path, caption=final_caption, thumb=thumb_file)
+                                await bot_app.send_video(target_destination, video=file_path, caption=final_caption, thumb=thumb_file)
                             elif target_msg.document:
-                                await bot_app.send_document(chat_id, document=file_path, caption=final_caption, thumb=thumb_file)
+                                await bot_app.send_document(target_destination, document=file_path, caption=final_caption, thumb=thumb_file)
                             elif target_msg.photo:
-                                await bot_app.send_photo(chat_id, photo=file_path, caption=final_caption)
+                                await bot_app.send_photo(target_destination, photo=file_path, caption=final_caption)
                             elif target_msg.audio:
-                                await bot_app.send_audio(chat_id, audio=file_path, caption=final_caption)
+                                await bot_app.send_audio(target_destination, audio=file_path, caption=final_caption)
                             elif target_msg.voice:
-                                await bot_app.send_voice(chat_id, voice=file_path, caption=final_caption)
+                                await bot_app.send_voice(target_destination, voice=file_path, caption=final_caption)
                         except Exception as upload_err:
                             print(f"bot_app upload error: {upload_err}. Trying user_app upload...")
                             # Fallback upload via user_app
                             if target_msg.video:
-                                await user_app.send_video(chat_id, video=file_path, caption=final_caption, thumb=thumb_file)
+                                await user_app.send_video(target_destination, video=file_path, caption=final_caption, thumb=thumb_file)
                             elif target_msg.document:
-                                await user_app.send_document(chat_id, document=file_path, caption=final_caption, thumb=thumb_file)
+                                await user_app.send_document(target_destination, document=file_path, caption=final_caption, thumb=thumb_file)
                             elif target_msg.photo:
-                                await user_app.send_photo(chat_id, photo=file_path, caption=final_caption)
+                                await user_app.send_photo(target_destination, photo=file_path, caption=final_caption)
 
                         if os.path.exists(file_path):
                             os.remove(file_path)
                         saved_count += 1
 
                     elif target_msg.text:
-                        await send_text_msg(session, chat_id, format_caption(target_msg.text))
+                        await send_text_msg(session, target_destination, format_caption(target_msg.text))
                         saved_count += 1
 
                     await asyncio.sleep(1)
@@ -255,7 +323,10 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
 
             if saved_count > 0:
                 if status_msg_id:
-                    await call_bot_api(session, "deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
+                    if target_destination != chat_id:
+                        await edit_text_msg(session, chat_id, status_msg_id, f"✅ **{saved_count} file(s) aapke destination channel me safaltapoorvak upload ho gayi hain!** 🚀")
+                    else:
+                        await call_bot_api(session, "deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
             else:
                 if status_msg_id:
                     await edit_text_msg(session, chat_id, status_msg_id, "❌ Message ya media nahi mila! Check karein ki aapka account channel me joined hai.")
@@ -265,8 +336,33 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                 await edit_text_msg(session, chat_id, status_msg_id, f"⚠️ Error: `{str(e)}`")
         return
 
-    # 3. Default fallback
-    await send_text_msg(session, chat_id, "💡 Kripya kisi restricted Telegram post ka link bhejein, jaise:\n`https://t.me/c/3863573134/31`")
+    # Default fallback
+    await send_text_msg(session, chat_id, "💡 Kripya kisi restricted Telegram post ka link bhejein, jaise:\n`https://t.me/c/3863573134/31`\n\nYa channel se koi post forward karein destination set karne ke liye.")
+
+
+# --- Handle Bot Added as Admin to Channel / Group ---
+async def handle_chat_member_update(session: aiohttp.ClientSession, member_update: dict):
+    try:
+        chat_info = member_update.get("chat", {})
+        new_status = member_update.get("new_chat_member", {}).get("status")
+        from_user = member_update.get("from", {})
+        from_id = from_user.get("id")
+
+        if new_status in ["administrator", "member"] and from_id:
+            ch_id = chat_info.get("id")
+            ch_title = chat_info.get("title", str(ch_id))
+            user_destinations[from_id] = ch_id
+            print(f"🎉 Bot added as {new_status} in {ch_title} ({ch_id}) by user {from_id}")
+            
+            # Send message to the user in PM
+            await send_text_msg(
+                session,
+                from_id,
+                f"🎉 **Bot ko '{ch_title}' me add/admin banaya gaya hai!**\n\n"
+                f"Ab aap bot ko jo bhi link bhejenge, saari files **`{ch_title}`** channel me upload hongi! 🚀"
+            )
+    except Exception as e:
+        print(f"Error handling chat member update: {e}")
 
 
 # --- Rock-solid HTTP Bot API Polling Loop ---
@@ -285,7 +381,11 @@ async def bot_polling_loop():
         while True:
             try:
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-                payload = {"offset": offset, "timeout": 20}
+                payload = {
+                    "offset": offset,
+                    "timeout": 20,
+                    "allowed_updates": ["message", "my_chat_member"]
+                }
                 async with session.post(url, json=payload) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -293,6 +393,8 @@ async def bot_polling_loop():
                             offset = update["update_id"] + 1
                             if "message" in update:
                                 asyncio.create_task(handle_message(session, update["message"]))
+                            elif "my_chat_member" in update:
+                                asyncio.create_task(handle_chat_member_update(session, update["my_chat_member"]))
                     else:
                         await asyncio.sleep(2)
             except asyncio.CancelledError:
