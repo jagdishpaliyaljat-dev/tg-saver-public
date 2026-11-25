@@ -52,6 +52,45 @@ except ValueError:
 START_MSG_ID = int(os.environ.get("START_MSG_ID", "1"))
 END_MSG_ID = int(os.environ.get("END_MSG_ID", "3572"))
 
+# Custom Caption and Thumbnail configuration
+CUSTOM_FOOTER = os.environ.get("CUSTOM_FOOTER", "")
+TELEGRAM_ID = os.environ.get("TELEGRAM_ID", "")
+CHANNEL_MENTION = os.environ.get("CHANNEL_MENTION", "")
+CUSTOM_THUMBNAIL_URL = os.environ.get("CUSTOM_THUMBNAIL_URL", "")
+CUSTOM_THUMBNAIL_PATH = os.environ.get("CUSTOM_THUMBNAIL_PATH", "thumb.jpg")
+
+if not CUSTOM_FOOTER and (TELEGRAM_ID or CHANNEL_MENTION):
+    footer_lines = []
+    if TELEGRAM_ID:
+        footer_lines.append(f"👤 By: {TELEGRAM_ID}")
+    if CHANNEL_MENTION:
+        footer_lines.append(f"📢 Channel: {CHANNEL_MENTION}")
+    CUSTOM_FOOTER = "\n".join(footer_lines)
+
+def format_caption(original_caption: str) -> str:
+    caption = original_caption or ""
+    if CUSTOM_FOOTER:
+        if caption:
+            caption = f"{caption}\n\n{CUSTOM_FOOTER}"
+        else:
+            caption = CUSTOM_FOOTER
+    if len(caption) > 1024:
+        caption = caption[:1020] + "..."
+    return caption
+
+def prepare_thumbnail():
+    if CUSTOM_THUMBNAIL_URL and not os.path.exists(CUSTOM_THUMBNAIL_PATH):
+        try:
+            import urllib.request
+            print(f"Downloading custom thumbnail from {CUSTOM_THUMBNAIL_URL}...")
+            urllib.request.urlretrieve(CUSTOM_THUMBNAIL_URL, CUSTOM_THUMBNAIL_PATH)
+            print("Custom thumbnail downloaded successfully!")
+        except Exception as e:
+            print(f"Failed to download custom thumbnail: {e}")
+    if os.path.exists(CUSTOM_THUMBNAIL_PATH):
+        return CUSTOM_THUMBNAIL_PATH
+    return None
+
 app = Client("koyeb_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
 async def start_transfer():
@@ -60,6 +99,10 @@ async def start_transfer():
     print("Loading dialogs...")
     async for _ in app.get_dialogs(limit=50):
         pass
+
+    thumb_file = prepare_thumbnail()
+    if thumb_file:
+        print(f"Using custom thumbnail: {thumb_file}")
 
     print(f"Transfer started: From message {START_MSG_ID} to {END_MSG_ID}")
     total_saved = 0
@@ -71,7 +114,7 @@ async def start_transfer():
                 continue
 
             if msg.video or msg.document or msg.photo:
-                caption = msg.caption or ""
+                final_caption = format_caption(msg.caption)
                 print(f"[{msg_id}/{END_MSG_ID}] Downloading...")
                 file_path = await app.download_media(msg)
                 if not file_path:
@@ -79,11 +122,11 @@ async def start_transfer():
 
                 print(f"[{msg_id}/{END_MSG_ID}] Uploading to destination channel...")
                 if msg.video:
-                    await app.send_video(DESTINATION_CHAT, video=file_path, caption=caption)
+                    await app.send_video(DESTINATION_CHAT, video=file_path, caption=final_caption, thumb=thumb_file)
                 elif msg.document:
-                    await app.send_document(DESTINATION_CHAT, document=file_path, caption=caption)
+                    await app.send_document(DESTINATION_CHAT, document=file_path, caption=final_caption, thumb=thumb_file)
                 elif msg.photo:
-                    await app.send_photo(DESTINATION_CHAT, photo=file_path, caption=caption)
+                    await app.send_photo(DESTINATION_CHAT, photo=file_path, caption=final_caption)
 
                 total_saved += 1
                 if os.path.exists(file_path):
