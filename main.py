@@ -1,21 +1,21 @@
 import os
+import re
 import base64
 import asyncio
 import threading
+import aiohttp
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from pyrogram import Client, filters, idle
+from pyrogram import Client
 from pyrogram.errors import FloodWait
-from pyrogram.types import Message
 
 # --- Render Port & Health Server ---
 PORT = int(os.environ.get("PORT", "8080"))
 
-bot_status_info = {
-    "bot_connected": False,
-    "bot_username": None,
-    "user_connected": False,
+status_info = {
+    "bot_name": None,
     "user_name": None,
-    "error": None
+    "user_connected": False,
+    "last_activity": "Starting up..."
 }
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -25,13 +25,13 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         html = f"""
         <html>
-        <head><title>Telegram Saver Bot Status</title></head>
+        <head><title>Telegram Saver Bot</title></head>
         <body style="font-family: sans-serif; padding: 20px; line-height: 1.6;">
             <h2>🚀 Telegram Restricted Content Saver Bot</h2>
             <hr>
-            <p><b>Bot Client:</b> {"✅ Connected (@" + str(bot_status_info['bot_username']) + ")" if bot_status_info['bot_connected'] else "❌ Disconnected / Invalid BOT_TOKEN"}</p>
-            <p><b>User Session:</b> {"✅ Connected (" + str(bot_status_info['user_name']) + ")" if bot_status_info['user_connected'] else "❌ Disconnected"}</p>
-            {"<p style='color:red;'><b>Error:</b> " + str(bot_status_info['error']) + "</p>" if bot_status_info['error'] else ""}
+            <p><b>Bot Status:</b> {"✅ Active (@" + str(status_info['bot_name']) + ")" if status_info['bot_name'] else "⏳ Connecting..."}</p>
+            <p><b>User Session:</b> {"✅ Connected (" + str(status_info['user_name']) + ")" if status_info['user_connected'] else "❌ Disconnected"}</p>
+            <p><b>Last Status:</b> {status_info['last_activity']}</p>
             <p><b>Server:</b> Running 24/7 on port {PORT}</p>
         </body>
         </html>
@@ -64,22 +64,7 @@ if len(decoded) == 270:
 else:
     SESSION_STRING = raw_session
 
-source_val = os.environ.get("SOURCE_CHAT", "-1003863573134")
-try:
-    SOURCE_CHAT = int(source_val)
-except ValueError:
-    SOURCE_CHAT = source_val
-
-dest_val = os.environ.get("DESTINATION_CHAT", "-1004406877280")
-try:
-    DESTINATION_CHAT = int(dest_val)
-except ValueError:
-    DESTINATION_CHAT = dest_val
-
-START_MSG_ID = int(os.environ.get("START_MSG_ID", "1"))
-END_MSG_ID = int(os.environ.get("END_MSG_ID", "3572"))
-AUTO_TRANSFER = os.environ.get("AUTO_TRANSFER", "false").lower() == "true"
-
+# Caption & Thumbnail config
 CUSTOM_FOOTER = os.environ.get("CUSTOM_FOOTER", "")
 TELEGRAM_ID = os.environ.get("TELEGRAM_ID", "")
 CHANNEL_MENTION = os.environ.get("CHANNEL_MENTION", "")
@@ -113,51 +98,76 @@ def prepare_thumbnail():
             urllib.request.urlretrieve(CUSTOM_THUMBNAIL_URL, CUSTOM_THUMBNAIL_PATH)
             print("Custom thumbnail downloaded successfully!")
         except Exception as e:
-            print(f"Failed to download custom thumbnail: {e}")
+            print(f"Failed to download thumbnail: {e}")
     if os.path.exists(CUSTOM_THUMBNAIL_PATH):
         return CUSTOM_THUMBNAIL_PATH
     return None
 
-# User client (Always initialized for fetching restricted media)
+# Pyrogram Clients
 user_app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
-
-# Bot client (Always initialized to listen for user commands)
-# If BOT_TOKEN is empty in env, we create client conditionally
-bot_app = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) if BOT_TOKEN else None
+bot_app = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 
-# --- Bot Message Handlers ---
-if bot_app:
-    @bot_app.on_message(filters.command("start") & filters.private)
-    async def start_command(client, message: Message):
-        user_name = message.from_user.first_name if message.from_user else "User"
-        
-        status_line = "✅ **User Session:** Connected" if bot_status_info["user_connected"] else "⚠️ **User Session:** Disconnected"
-        
+# --- Helper: Bot API HTTP Caller ---
+async def call_bot_api(session: aiohttp.ClientSession, method: str, payload: dict = None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    try:
+        async with session.post(url, json=payload or {}, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            return await resp.json()
+    except Exception as e:
+        print(f"Bot API {method} error: {e}")
+        return None
+
+async def send_text_msg(session: aiohttp.ClientSession, chat_id: int, text: str):
+    return await call_bot_api(session, "sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    })
+
+async def edit_text_msg(session: aiohttp.ClientSession, chat_id: int, message_id: int, text: str):
+    return await call_bot_api(session, "editMessageText", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    })
+
+
+# --- Handle Incoming Message ---
+async def handle_message(session: aiohttp.ClientSession, msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    user_name = msg.get("from", {}).get("first_name", "Friend")
+
+    status_info["last_activity"] = f"Received message from {user_name} ({chat_id})"
+    print(f"📩 Incoming from {user_name} ({chat_id}): {text}")
+
+    # 1. /start command
+    if text.startswith("/start"):
+        session_status = "✅ Connected" if status_info["user_connected"] else "⚠️ Disconnected"
         welcome_text = (
             f"👋 **Namaste {user_name}!**\n\n"
             "Main **Save Restricted Content Bot** hoon.\n\n"
-            f"{status_line}\n\n"
+            f"⚡ **User Session Status:** {session_status}\n\n"
             "📌 **Kaise use karein:**\n"
-            "Mujhe kisi bhi Telegram post ka link bhejo:\n\n"
-            "• **Single post:** `https://t.me/c/1234567890/42`\n"
-            "• **Multiple posts (Range):** `https://t.me/c/1234567890/42-45`\n\n"
-            "⚡ *Restricted / Protected files download hokar aapko mil jayengi!*"
+            "Mujhe kisi bhi restricted Telegram post ka link bhejo:\n\n"
+            "• **Single post:** `https://t.me/c/3863573134/31`\n"
+            "• **Multiple posts (Range):** `https://t.me/c/3863573134/31-35`\n\n"
+            "Files download hokar bina restriction ke aapko mil jayengi! 🚀"
         )
-        await message.reply_text(welcome_text)
+        await send_text_msg(session, chat_id, welcome_text)
+        return
 
-    @bot_app.on_message(filters.text & filters.private)
-    async def link_handler(client, message: Message):
-        text = message.text.strip()
-        if "t.me/" not in text:
-            await message.reply_text("❌ Kripya valid Telegram post link bhejein.\nExample: `https://t.me/c/1234567890/100`")
+    # 2. Telegram Link handler
+    if "t.me/" in text:
+        if not status_info["user_connected"]:
+            await send_text_msg(session, chat_id, "⚠️ User session abhi connect nahi hai. Kripya thoda wait karein ya logs check karein.")
             return
 
-        if not bot_status_info["user_connected"]:
-            await message.reply_text("⚠️ User session connect nahi hai! Kripya Render logs ya session string check karein.")
-            return
+        resp = await send_text_msg(session, chat_id, "⏳ **Link process ho raha hai...**")
+        status_msg_id = resp.get("result", {}).get("message_id") if resp else None
 
-        status_msg = await message.reply_text("⏳ Processing link...")
         thumb_file = prepare_thumbnail()
 
         try:
@@ -171,24 +181,25 @@ if bot_app:
                 start_id = end_id = int(last_part)
 
             if "/c/" in clean_text:
-                chat_id = int("-100" + parts[-2])
+                source_chat_id = int("-100" + parts[-2])
             else:
-                chat_id = parts[-2]
+                source_chat_id = parts[-2]
 
             total_msgs = (end_id - start_id) + 1
             if total_msgs > 100:
-                await status_msg.edit_text("⚠️ Ek baar me maximum 100 messages process kar sakte hain!")
+                if status_msg_id:
+                    await edit_text_msg(session, chat_id, status_msg_id, "⚠️ Ek baar me maximum 100 messages hi save kar sakte hain!")
                 return
 
             saved_count = 0
             for curr_id in range(start_id, end_id + 1):
                 try:
-                    if total_msgs > 1:
-                        await status_msg.edit_text(f"📥 Downloading message [{curr_id}/{end_id}]...")
-                    else:
-                        await status_msg.edit_text("📥 Content download ho raha hai...")
+                    status_text = f"📥 **Downloading message [{curr_id}/{end_id}]...**" if total_msgs > 1 else "📥 **Restricted file download ho rahi hai...**"
+                    if status_msg_id:
+                        await edit_text_msg(session, chat_id, status_msg_id, status_text)
 
-                    target_msg = await user_app.get_messages(chat_id, curr_id)
+                    # Fetch message using user session
+                    target_msg = await user_app.get_messages(source_chat_id, curr_id)
                     if not target_msg or target_msg.empty:
                         continue
 
@@ -199,125 +210,122 @@ if bot_app:
                         if not file_path:
                             continue
 
-                        await status_msg.edit_text("📤 Upload ho raha hai...")
+                        if status_msg_id:
+                            await edit_text_msg(session, chat_id, status_msg_id, "📤 **Aapki chat me upload ho raha hai...**")
 
-                        if target_msg.video:
-                            await client.send_video(message.chat.id, video=file_path, caption=final_caption, thumb=thumb_file)
-                        elif target_msg.document:
-                            await client.send_document(message.chat.id, document=file_path, caption=final_caption, thumb=thumb_file)
-                        elif target_msg.photo:
-                            await client.send_photo(message.chat.id, photo=file_path, caption=final_caption)
-                        elif target_msg.audio:
-                            await client.send_audio(message.chat.id, audio=file_path, caption=final_caption)
-                        elif target_msg.voice:
-                            await client.send_voice(message.chat.id, voice=file_path, caption=final_caption)
+                        # Send via Pyrogram bot_app (supports up to 2GB)
+                        try:
+                            if target_msg.video:
+                                await bot_app.send_video(chat_id, video=file_path, caption=final_caption, thumb=thumb_file)
+                            elif target_msg.document:
+                                await bot_app.send_document(chat_id, document=file_path, caption=final_caption, thumb=thumb_file)
+                            elif target_msg.photo:
+                                await bot_app.send_photo(chat_id, photo=file_path, caption=final_caption)
+                            elif target_msg.audio:
+                                await bot_app.send_audio(chat_id, audio=file_path, caption=final_caption)
+                            elif target_msg.voice:
+                                await bot_app.send_voice(chat_id, voice=file_path, caption=final_caption)
+                        except Exception as upload_err:
+                            print(f"bot_app upload error: {upload_err}. Trying user_app upload...")
+                            # Fallback upload via user_app
+                            if target_msg.video:
+                                await user_app.send_video(chat_id, video=file_path, caption=final_caption, thumb=thumb_file)
+                            elif target_msg.document:
+                                await user_app.send_document(chat_id, document=file_path, caption=final_caption, thumb=thumb_file)
+                            elif target_msg.photo:
+                                await user_app.send_photo(chat_id, photo=file_path, caption=final_caption)
 
                         if os.path.exists(file_path):
                             os.remove(file_path)
                         saved_count += 1
 
                     elif target_msg.text:
-                        await client.send_message(message.chat.id, text=format_caption(target_msg.text))
+                        await send_text_msg(session, chat_id, format_caption(target_msg.text))
                         saved_count += 1
 
                     await asyncio.sleep(1)
 
                 except FloodWait as fw:
-                    await status_msg.edit_text(f"⏳ Telegram FloodWait: {fw.value}s wait kar rahe hain...")
-                    await asyncio.sleep(fw.value + 2)
+                    wait_sec = fw.value + 2
+                    if status_msg_id:
+                        await edit_text_msg(session, chat_id, status_msg_id, f"⏳ Telegram FloodWait: {wait_sec}s wait kar rahe hain...")
+                    await asyncio.sleep(wait_sec)
                 except Exception as inner_err:
-                    print(f"Error on message {curr_id}: {inner_err}")
+                    print(f"Error on msg {curr_id}: {inner_err}")
 
             if saved_count > 0:
-                await status_msg.delete()
+                if status_msg_id:
+                    await call_bot_api(session, "deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
             else:
-                await status_msg.edit_text("❌ Koi content nahi mila. Kripya check karein ki aapka account us channel me joined hai!")
+                if status_msg_id:
+                    await edit_text_msg(session, chat_id, status_msg_id, "❌ Message ya media nahi mila! Check karein ki aapka account channel me joined hai.")
 
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ Error: `{str(e)}`")
+            if status_msg_id:
+                await edit_text_msg(session, chat_id, status_msg_id, f"⚠️ Error: `{str(e)}`")
+        return
+
+    # 3. Default fallback
+    await send_text_msg(session, chat_id, "💡 Kripya kisi restricted Telegram post ka link bhejein, jaise:\n`https://t.me/c/3863573134/31`")
 
 
-# --- Automated Channel Batch Transfer (Optional) ---
-async def start_transfer():
-    print(f"Auto-Transfer started: From message {START_MSG_ID} to {END_MSG_ID}")
-    total_saved = 0
-    thumb_file = prepare_thumbnail()
+# --- Rock-solid HTTP Bot API Polling Loop ---
+async def bot_polling_loop():
+    print("Starting Telegram Bot API HTTP Polling Loop...")
+    offset = 0
+    timeout_client = aiohttp.ClientTimeout(total=45)
 
-    for msg_id in range(START_MSG_ID, END_MSG_ID + 1):
-        try:
-            msg = await user_app.get_messages(SOURCE_CHAT, msg_id)
-            if not msg or msg.empty:
-                continue
+    async with aiohttp.ClientSession(timeout=timeout_client) as session:
+        # Get bot info
+        me_resp = await call_bot_api(session, "getMe")
+        if me_resp and me_resp.get("ok"):
+            status_info["bot_name"] = me_resp["result"]["username"]
+            print(f"✅ Bot API Poller connected as @{status_info['bot_name']}")
 
-            if msg.video or msg.document or msg.photo:
-                final_caption = format_caption(msg.caption)
-                print(f"[{msg_id}/{END_MSG_ID}] Downloading...")
-                file_path = await user_app.download_media(msg)
-                if not file_path:
-                    continue
-
-                print(f"[{msg_id}/{END_MSG_ID}] Uploading to destination channel...")
-                if msg.video:
-                    await user_app.send_video(DESTINATION_CHAT, video=file_path, caption=final_caption, thumb=thumb_file)
-                elif msg.document:
-                    await user_app.send_document(DESTINATION_CHAT, document=file_path, caption=final_caption, thumb=thumb_file)
-                elif msg.photo:
-                    await user_app.send_photo(DESTINATION_CHAT, photo=file_path, caption=final_caption)
-
-                total_saved += 1
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-
-                print(f"[{msg_id}] Done! (Total transferred: {total_saved})")
+        while True:
+            try:
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+                payload = {"offset": offset, "timeout": 20}
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for update in data.get("result", []):
+                            offset = update["update_id"] + 1
+                            if "message" in update:
+                                asyncio.create_task(handle_message(session, update["message"]))
+                    else:
+                        await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Polling warning: {e}")
                 await asyncio.sleep(2)
-        except FloodWait as e:
-            print(f"FloodWait: sleeping {e.value} seconds...")
-            await asyncio.sleep(e.value + 5)
-        except Exception as e:
-            print(f"Error on msg {msg_id}: {e}")
-
-    print(f"All done! Total {total_saved} files transferred.")
 
 
-# --- Main Runner ---
+# --- Main Entry Point ---
 async def main():
-    # 1. Start Bot Client FIRST (guarantees bot is alive and responds to /start)
-    if bot_app:
-        try:
-            print("Starting Telegram Bot (@BotFather token)...")
-            await bot_app.start()
-            bot_me = await bot_app.get_me()
-            bot_status_info["bot_connected"] = True
-            bot_status_info["bot_username"] = bot_me.username
-            print(f"✅ Bot successfully started as @{bot_me.username} (ID: {bot_me.id})")
-        except Exception as e:
-            bot_status_info["error"] = f"Bot Start Error: {e}"
-            print(f"❌ Error starting bot_app: {e}")
-    else:
-        print("⚠️ NOTE: BOT_TOKEN is missing or empty in Environment Variables!")
-        print("Render me Environment tab me jakar BOT_TOKEN key zaroor add karein.")
-
-    # 2. Start User Client (in separate try block so it NEVER crashes bot)
+    # 1. Connect user session (for downloading restricted media)
     try:
-        print("Connecting Telegram User Session...")
+        print("Connecting User Account Session...")
         await user_app.start()
         user_me = await user_app.get_me()
-        bot_status_info["user_connected"] = True
-        bot_status_info["user_name"] = user_me.first_name
+        status_info["user_connected"] = True
+        status_info["user_name"] = user_me.first_name
         print(f"✅ User account connected: {user_me.first_name} (@{user_me.username})")
-        
-        async for _ in user_app.get_dialogs(limit=20):
-            pass
     except Exception as e:
-        bot_status_info["error"] = f"User Session Error: {e}"
-        print(f"❌ User session failed to connect: {e}")
-        print("Check if SESSION_STRING is valid and account is active.")
+        print(f"❌ User session connection error: {e}")
 
-    if AUTO_TRANSFER and bot_status_info["user_connected"]:
-        asyncio.create_task(start_transfer())
+    # 2. Start bot_app (for sending up to 2GB media to users)
+    try:
+        print("Connecting Pyrogram bot_app...")
+        await bot_app.start()
+        print("✅ bot_app started for media uploads!")
+    except Exception as e:
+        print(f"⚠️ bot_app MTProto warning: {e}")
 
-    print("⚡ System is running. Waiting for events...")
-    await idle()
+    # 3. Start guaranteed HTTP Polling Loop
+    status_info["last_activity"] = "Bot is LIVE and listening for messages!"
+    await bot_polling_loop()
 
 if __name__ == "__main__":
     asyncio.run(main())
