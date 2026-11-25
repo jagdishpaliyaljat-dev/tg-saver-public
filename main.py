@@ -64,14 +64,14 @@ if len(decoded) == 270:
 else:
     SESSION_STRING = raw_session
 
-# Destination Channel Mapping (User ID -> Target Channel ID)
+# Destination Channel Mapping
 default_dest = os.environ.get("DESTINATION_CHAT", "").strip()
 try:
     DEFAULT_DESTINATION = int(default_dest) if default_dest else None
 except ValueError:
     DEFAULT_DESTINATION = default_dest
 
-user_destinations = {}  # {user_id: channel_id or channel_title}
+user_destinations = {}
 
 # Caption & Thumbnail config
 CUSTOM_FOOTER = os.environ.get("CUSTOM_FOOTER", "")
@@ -143,6 +143,22 @@ async def edit_text_msg(session: aiohttp.ClientSession, chat_id: int, message_id
     })
 
 
+# Safe message fetch with automatic peer resolving cache
+async def get_target_message_safe(chat_id, msg_id):
+    try:
+        return await user_app.get_messages(chat_id, msg_id)
+    except Exception as e:
+        print(f"Initial get_messages for {chat_id} msg {msg_id} failed: {e}. Resolving peer cache...")
+        # Populate peer cache by scanning dialogs
+        try:
+            async for dialog in user_app.get_dialogs(limit=50):
+                if dialog.chat and dialog.chat.id == chat_id:
+                    break
+        except Exception as d_err:
+            print(f"Dialog cache scan error: {d_err}")
+        return await user_app.get_messages(chat_id, msg_id)
+
+
 # --- Handle Incoming Message ---
 async def handle_message(session: aiohttp.ClientSession, msg: dict):
     chat_id = msg["chat"]["id"]
@@ -180,12 +196,12 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
         welcome_text = (
             f"👋 **Namaste {user_name}!**\n\n"
             "Main **Save Restricted Content Bot** hoon.\n\n"
-            f"⚡ **User Session:** {session_status}\n"
+            f"⚡ **User Session (Ananya):** {session_status}\n"
             f"🎯 **Active Destination:** {dest_display}\n\n"
             "📌 **Commands:**\n"
             "• **Link Bhejo:** `https://t.me/c/3863573134/31`\n"
             "• **Range Bhejo:** `https://t.me/c/3863573134/31-35`\n"
-            "• **Channel me bhejne ke liye:** Bot ko apne channel/group me Admin banayein, ya channel se koi bhi post mujhe Forward karein!\n"
+            "• `/channels` - Check karein Ananya account kin channels me joined hai\n"
             "• `/setchat -100xxxxxxxxxx` - Manually channel ID set karein\n"
             "• `/clearchat` - Wapas private chat me paane ke liye\n"
             "• `/mychat` - Check karein active destination channel"
@@ -193,7 +209,33 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
         await send_text_msg(session, chat_id, welcome_text)
         return
 
-    # 2. /setchat command
+    # 2. /channels command (Lists all channels Ananya account is joined in)
+    if text.startswith("/channels") or text.startswith("/check"):
+        wait_msg = await send_text_msg(session, chat_id, "🔍 Ananya account ke joined channels scan ho rahe hain...")
+        wait_id = wait_msg.get("result", {}).get("message_id") if wait_msg else None
+
+        channels_list = []
+        try:
+            async for dialog in user_app.get_dialogs(limit=30):
+                if dialog.chat and dialog.chat.type in ["channel", "supergroup"]:
+                    title = dialog.chat.title or "Untitled"
+                    cid = dialog.chat.id
+                    channels_list.append(f"• **{title}** (`{cid}`)")
+            
+            if channels_list:
+                result_text = "📋 **Aapka User Account (Ananya) in channels me joined hai:**\n\n" + "\n".join(channels_list[:20])
+            else:
+                result_text = "⚠️ Ananya account kisi bhi channel me joined nahi mila."
+        except Exception as ch_err:
+            result_text = f"❌ Error loading channels: `{ch_err}`"
+
+        if wait_id:
+            await edit_text_msg(session, chat_id, wait_id, result_text)
+        else:
+            await send_text_msg(session, chat_id, result_text)
+        return
+
+    # 3. /setchat command
     if text.startswith("/setchat"):
         parts = text.split()
         if len(parts) > 1:
@@ -207,7 +249,7 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
             await send_text_msg(session, chat_id, "Usage: `/setchat -100xxxxxxxxxx` ya channel se koi post mujhe forward karein.")
         return
 
-    # 3. /mychat command
+    # 4. /mychat command
     if text.startswith("/mychat"):
         curr_dest = user_destinations.get(from_id, DEFAULT_DESTINATION)
         if curr_dest:
@@ -216,20 +258,19 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
             await send_text_msg(session, chat_id, "🎯 Abhi content aapki Private Chat (PM) me aa raha hai.\nChannel me bhejne ke liye channel se koi bhi post yahan forward karein.")
         return
 
-    # 4. /clearchat command
+    # 5. /clearchat command
     if text.startswith("/clearchat"):
         if from_id in user_destinations:
             del user_destinations[from_id]
         await send_text_msg(session, chat_id, "✅ Destination reset ho gaya! Ab files aapki Private Chat me aayengi.")
         return
 
-    # 5. Telegram Link handler
+    # 6. Telegram Link handler
     if "t.me/" in text:
         if not status_info["user_connected"]:
             await send_text_msg(session, chat_id, "⚠️ User session abhi connect nahi hai. Kripya thoda wait karein ya logs check karein.")
             return
 
-        # Determine target destination (channel/group or private chat)
         target_destination = user_destinations.get(from_id, DEFAULT_DESTINATION or chat_id)
 
         resp = await send_text_msg(session, chat_id, "⏳ **Link process ho raha hai...**")
@@ -259,15 +300,20 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                 return
 
             saved_count = 0
+            last_err_detail = None
+
             for curr_id in range(start_id, end_id + 1):
                 try:
                     status_text = f"📥 **Downloading message [{curr_id}/{end_id}]...**" if total_msgs > 1 else "📥 **Restricted file download ho rahi hai...**"
                     if status_msg_id:
                         await edit_text_msg(session, chat_id, status_msg_id, status_text)
 
-                    # Fetch message using user session
-                    target_msg = await user_app.get_messages(source_chat_id, curr_id)
+                    # Fetch message safely with peer caching
+                    target_msg = await get_target_message_safe(source_chat_id, curr_id)
+                    
                     if not target_msg or target_msg.empty:
+                        last_err_detail = f"Message #{curr_id} empty hai ya delete ho chuka hai."
+                        print(f"Message {curr_id} is empty or not found.")
                         continue
 
                     final_caption = format_caption(target_msg.caption)
@@ -275,6 +321,7 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                     if target_msg.media:
                         file_path = await user_app.download_media(target_msg)
                         if not file_path:
+                            last_err_detail = "Media download fail ho gaya."
                             continue
 
                         dest_label = f"Channel (`{target_destination}`)" if target_destination != chat_id else "Aapki chat"
@@ -295,7 +342,6 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                                 await bot_app.send_voice(target_destination, voice=file_path, caption=final_caption)
                         except Exception as upload_err:
                             print(f"bot_app upload error: {upload_err}. Trying user_app upload...")
-                            # Fallback upload via user_app
                             if target_msg.video:
                                 await user_app.send_video(target_destination, video=file_path, caption=final_caption, thumb=thumb_file)
                             elif target_msg.document:
@@ -319,6 +365,7 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                         await edit_text_msg(session, chat_id, status_msg_id, f"⏳ Telegram FloodWait: {wait_sec}s wait kar rahe hain...")
                     await asyncio.sleep(wait_sec)
                 except Exception as inner_err:
+                    last_err_detail = str(inner_err)
                     print(f"Error on msg {curr_id}: {inner_err}")
 
             if saved_count > 0:
@@ -329,7 +376,22 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                         await call_bot_api(session, "deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
             else:
                 if status_msg_id:
-                    await edit_text_msg(session, chat_id, status_msg_id, "❌ Message ya media nahi mila! Check karein ki aapka account channel me joined hai.")
+                    err_upper = (last_err_detail or "").upper()
+                    if "USER_NOT_PARTICIPANT" in err_upper or "CHANNEL_PRIVATE" in err_upper:
+                        reason = "Aapka user account (**Ananya**) is private channel me joined nahi hai! Kripya pehle **Ananya** account ko is channel me add/join karein."
+                    elif "PEER_ID_INVALID" in err_upper:
+                        reason = f"Channel peer ID `{source_chat_id}` Telegram cache me nahi mila. `/channels` command chala kar check karein."
+                    elif "EMPTY" in err_upper:
+                        reason = f"Message link galat hai ya message delete ho chuka hai (ID: {start_id})."
+                    else:
+                        reason = last_err_detail or "Unknown error"
+
+                    error_report = (
+                        f"❌ **Content Fetch Nahi Hua!**\n\n"
+                        f"🔍 **Reason:** `{reason}`\n\n"
+                        f"📌 **Tip:** Bot me `/channels` likhein taaki Ananya ke joined channels check ho sakein."
+                    )
+                    await edit_text_msg(session, chat_id, status_msg_id, error_report)
 
         except Exception as e:
             if status_msg_id:
@@ -337,7 +399,7 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
         return
 
     # Default fallback
-    await send_text_msg(session, chat_id, "💡 Kripya kisi restricted Telegram post ka link bhejein, jaise:\n`https://t.me/c/3863573134/31`\n\nYa channel se koi post forward karein destination set karne ke liye.")
+    await send_text_msg(session, chat_id, "💡 Kripya kisi restricted Telegram post ka link bhejein, jaise:\n`https://t.me/c/3863573134/31`\n\nChannels check karne ke liye `/channels` likhein.")
 
 
 # --- Handle Bot Added as Admin to Channel / Group ---
@@ -354,7 +416,6 @@ async def handle_chat_member_update(session: aiohttp.ClientSession, member_updat
             user_destinations[from_id] = ch_id
             print(f"🎉 Bot added as {new_status} in {ch_title} ({ch_id}) by user {from_id}")
             
-            # Send message to the user in PM
             await send_text_msg(
                 session,
                 from_id,
@@ -372,7 +433,6 @@ async def bot_polling_loop():
     timeout_client = aiohttp.ClientTimeout(total=45)
 
     async with aiohttp.ClientSession(timeout=timeout_client) as session:
-        # Get bot info
         me_resp = await call_bot_api(session, "getMe")
         if me_resp and me_resp.get("ok"):
             status_info["bot_name"] = me_resp["result"]["username"]
@@ -414,6 +474,16 @@ async def main():
         status_info["user_connected"] = True
         status_info["user_name"] = user_me.first_name
         print(f"✅ User account connected: {user_me.first_name} (@{user_me.username})")
+
+        # Cache initial dialog peers
+        print("Pre-caching channels from dialogs...")
+        try:
+            async for _ in user_app.get_dialogs(limit=30):
+                pass
+            print("✅ Channel peers cached successfully!")
+        except Exception as d_err:
+            print(f"Initial dialog pre-cache warning: {d_err}")
+
     except Exception as e:
         print(f"❌ User session connection error: {e}")
 
