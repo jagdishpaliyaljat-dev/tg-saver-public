@@ -50,7 +50,7 @@ threading.Thread(target=run_health_server, daemon=True).start()
 # --- Credentials & Config ---
 API_ID = int(os.environ.get("API_ID", "28220028"))
 API_HASH = os.environ.get("API_HASH", "2644b27a6f3bff5dea5d09e657b01a5f")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip().strip('"').strip("'")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "9138676538:AAGmn3JyvgTlJVuWHf6X-_GfKr4jaqstuzU").strip().strip('"').strip("'")
 
 raw_session = os.environ.get(
     "SESSION_STRING",
