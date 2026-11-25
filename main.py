@@ -9,12 +9,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client, raw
 from pyrogram.errors import FloodWait
 
+# Ensure an asyncio event loop exists in MainThread for Pyrogram
 try:
-    import uvloop
-    uvloop.install()
-    print("🚀 uvloop fast event loop installed!")
-except ImportError:
-    pass
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
 # --- Render Port & Health Server ---
 PORT = int(os.environ.get("PORT", "8080"))
@@ -879,4 +879,7 @@ async def main():
     await bot_polling_loop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        loop.run_until_complete(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
