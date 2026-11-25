@@ -15,8 +15,17 @@ status_info = {
     "bot_name": None,
     "user_name": None,
     "user_connected": False,
+    "tgcrypto": "⏳ Checking...",
     "last_activity": "Starting up..."
 }
+
+try:
+    import tgcrypto
+    status_info["tgcrypto"] = "✅ Active (Hardware C-Acceleration 50x-100x Faster)"
+    print("🚀 Hardware Accelerated TgCrypto is ACTIVE! Maximum upload/download speed enabled.")
+except ImportError:
+    status_info["tgcrypto"] = "⚠️ Missing (Slow Pure-Python)"
+    print("⚠️ TgCrypto missing, running in slow pure-python mode.")
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -31,6 +40,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             <hr>
             <p><b>Bot Status:</b> {"✅ Active (@" + str(status_info['bot_name']) + ")" if status_info['bot_name'] else "⏳ Connecting..."}</p>
             <p><b>User Session:</b> {"✅ Connected (" + str(status_info['user_name']) + ")" if status_info['user_connected'] else "❌ Disconnected"}</p>
+            <p><b>Speed Acceleration:</b> {status_info['tgcrypto']}</p>
             <p><b>Last Status:</b> {status_info['last_activity']}</p>
             <p><b>Server:</b> Running 24/7 on port {PORT}</p>
         </body>
@@ -114,9 +124,9 @@ def prepare_thumbnail():
         return CUSTOM_THUMBNAIL_PATH
     return None
 
-# Pyrogram Clients
-user_app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
-bot_app = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Pyrogram Clients with multiple workers and auto-flood handling
+user_app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING, workers=16, sleep_threshold=60)
+bot_app = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16, sleep_threshold=60)
 
 
 # --- Helper: Bot API HTTP Caller ---
