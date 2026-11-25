@@ -89,13 +89,14 @@ if not CUSTOM_FOOTER and (TELEGRAM_ID or CHANNEL_MENTION):
         footer_lines.append(f"📢 Channel: {CHANNEL_MENTION}")
     CUSTOM_FOOTER = "\n".join(footer_lines)
 
-def format_caption(original_caption: str) -> str:
+def format_caption(original_caption: str, user_id: int = None) -> str:
     caption = original_caption or ""
-    if CUSTOM_FOOTER:
+    active_footer = user_destinations.get(f"caption_{user_id}", CUSTOM_FOOTER) if user_id else CUSTOM_FOOTER
+    if active_footer:
         if caption:
-            caption = f"{caption}\n\n{CUSTOM_FOOTER}"
+            caption = f"{caption}\n\n{active_footer}"
         else:
-            caption = CUSTOM_FOOTER
+            caption = active_footer
     if len(caption) > 1024:
         caption = caption[:1020] + "..."
     return caption
@@ -275,92 +276,146 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
             )
             return
 
+    # Check if a photo was sent to the bot -> Set as Custom Thumbnail!
+    if "photo" in msg:
+        photo_list = msg["photo"]
+        best_photo = photo_list[-1]  # Highest resolution
+        file_id = best_photo["file_id"]
+
+        f_info = await call_bot_api(session, "getFile", {"file_id": file_id})
+        if f_info and f_info.get("ok"):
+            f_path = f_info["result"]["file_path"]
+            download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}"
+            async with session.get(download_url) as img_resp:
+                if img_resp.status == 200:
+                    with open(CUSTOM_THUMBNAIL_PATH, "wb") as f:
+                        f.write(await img_resp.read())
+                    await send_text_msg(
+                        session,
+                        chat_id,
+                        "🖼️ **Custom Thumbnail Set Ho Gaya!**\n\n"
+                        "Ab se sabhi forwarded videos par yeh thumbnail lag kar aayega! 🚀\n\n"
+                        "• Thumbnail dekhne ke liye: `/showthumb`\n"
+                        "• Thumbnail hatane ke liye: `/delthumb`"
+                    )
+                    return
+
     # 1. /start command
     if text.startswith("/start"):
         session_status = "✅ Connected" if status_info["user_connected"] else "⚠️ Disconnected"
         curr_dest = user_destinations.get(from_id, DEFAULT_DESTINATION)
         dest_display = f"`{curr_dest}`" if curr_dest else "Private Chat (PM)"
+        has_thumb = "✅ Set Hai" if os.path.exists(CUSTOM_THUMBNAIL_PATH) else "❌ Default"
 
         welcome_text = (
             f"👋 **Namaste {user_name}!**\n\n"
             "Main **Save Restricted Content Bot** hoon.\n\n"
             f"⚡ **User Session (Ananya):** {session_status}\n"
-            f"🎯 **Active Destination:** {dest_display}\n\n"
+            f"🎯 **Destination:** {dest_display}\n"
+            f"🖼️ **Thumbnail:** {has_thumb}\n\n"
             "📌 **Commands Menu:**\n"
-            "• `/help` - Bot use karne ka poora guide\n"
-            "• `/channels` - Ananya account ke joined channels\n"
+            "• `/help` - Poora guide aur examples\n"
+            "• `/caption` - Custom caption footer badlein\n"
+            "• `/showthumb` - Current thumbnail dekhein\n"
+            "• `/delthumb` - Thumbnail delete karein\n"
+            "• `/channels` - Joined channels ki list\n"
             "• `/status` - Bot aur server status\n"
-            "• `/mychat` - Active destination channel dekhein\n"
-            "• `/setchat <ID>` - Manually channel ID set karein\n"
-            "• `/clearchat` - Private chat me reset karein\n"
-            "• `/caption` - Custom caption footer set karein\n\n"
-            "🔗 **Direct Link Bhejein:**\n"
-            "• `https://t.me/c/3863573134/31` (Single)\n"
-            "• `https://t.me/c/3863573134/31-35` (Range)"
+            "• `/mychat` - Active destination channel\n"
+            "• `/clearchat` - Private chat me reset karein\n\n"
+            "💡 **Thumbnail Set Karna:** Mujhe seedhe koi bhi **Photo** send karein!\n"
+            "💡 **Caption Badlna:** `/caption 👤 By: @ID | 📢 Channel: @Channel`"
         )
         await send_text_msg(session, chat_id, welcome_text)
         return
 
-    # 2. /help command
+    # 2. /showthumb command
+    if text.startswith("/showthumb"):
+        if os.path.exists(CUSTOM_THUMBNAIL_PATH):
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            form.add_field("caption", "🖼️ **Aapka Current Active Thumbnail**\n\nIse hatane ke liye `/delthumb` likhein.")
+            form.add_field("photo", open(CUSTOM_THUMBNAIL_PATH, "rb"))
+            await session.post(url, data=form)
+        else:
+            await send_text_msg(session, chat_id, "ℹ️ Abhi koi custom thumbnail set nahi hai.\n\nNaya thumbnail lagane ke liye mujhe koi bhi **Photo** bhejein!")
+        return
+
+    # 3. /delthumb command
+    if text.startswith("/delthumb"):
+        if os.path.exists(CUSTOM_THUMBNAIL_PATH):
+            os.remove(CUSTOM_THUMBNAIL_PATH)
+            await send_text_msg(session, chat_id, "🗑️ **Custom thumbnail delete ho gaya!**\nAb videos par unka original default thumbnail aayega.")
+        else:
+            await send_text_msg(session, chat_id, "ℹ️ Koi custom thumbnail set nahi tha.")
+        return
+
+    # 4. /help command
     if text.startswith("/help"):
         help_text = (
-            "📖 **Telegram Restricted Content Saver Guide:**\n\n"
-            "1️⃣ **Restricted Files Save Karna:**\n"
-            "• Kisi bhi restricted channel ka post link copy karein aur mujhe bhej dein.\n"
-            "• Example: `https://t.me/c/3863573134/31`\n\n"
-            "2️⃣ **Multiple Files Ek Sath (Range):**\n"
-            "• Link ke aage hyphen `-` lagakar range daalein.\n"
-            "• Example: `https://t.me/c/3863573134/31-35`\n\n"
-            "3️⃣ **Channel/Group me Upload Karna:**\n"
-            "• Bot ko apne channel/group me **Admin** banayein.\n"
-            "• Ya channel ka koi bhi 1 message mujhe **Forward** karein.\n"
-            "• Ya `/setchat -100xxxxxxxxxx` likhein.\n\n"
-            "4️⃣ **Commands:**\n"
-            "• `/channels` - Check karein Ananya account kin channels me hai\n"
-            "• `/status` - Live server aur connection status\n"
-            "• `/mychat` - Active target channel\n"
-            "• `/clearchat` - Wapas private chat me paane ke liye\n"
-            "• `/caption <text>` - Naya caption footer set karein"
+            "📖 **Telegram Restricted Saver Bot Guide:**\n\n"
+            "🖼️ **1. Thumbnail Kaise Badlein?**\n"
+            "• Bot ko chat me koi bhi **Photo** bhejein. Bot use automatically thumbnail bana dega!\n"
+            "• `/showthumb` - Active thumbnail dekhne ke liye\n"
+            "• `/delthumb` - Thumbnail hatane ke liye\n\n"
+            "✍️ **2. Caption Kaise Badlein?**\n"
+            "• Command likhein: `/caption 👤 By: @YourID | 📢 Channel: @YourChannel`\n"
+            "• Check karne ke liye: `/caption`\n"
+            "• Reset karne ke liye: `/caption reset`\n\n"
+            "🚀 **3. Files Forward Karna:**\n"
+            "• Channel ke sabse upar wale message ka link bhejein: `https://t.me/c/3863573134/1`\n"
+            "• Bot automatically continuous batch shuru kar dega!\n"
+            "• Rokne ke liye: `/stop`"
         )
         await send_text_msg(session, chat_id, help_text)
         return
 
-    # 3. /status command
+    # 5. /status command
     if text.startswith("/status"):
         session_status = "✅ Connected (Ananya)" if status_info["user_connected"] else "❌ Disconnected"
         curr_dest = user_destinations.get(from_id, DEFAULT_DESTINATION)
         dest_display = f"`{curr_dest}`" if curr_dest else "Private Chat"
+        has_thumb = "✅ Custom Set Hai" if os.path.exists(CUSTOM_THUMBNAIL_PATH) else "❌ Default"
+        curr_cap = user_destinations.get(f"caption_{from_id}", CUSTOM_FOOTER or "Default")
+
         status_msg = (
             "⚡ **Live System Status:**\n\n"
             f"• **Bot Client:** ✅ Active (@{status_info['bot_name']})\n"
             f"• **User Account:** {session_status}\n"
-            f"• **Active Destination:** {dest_display}\n"
+            f"• **Destination:** {dest_display}\n"
+            f"• **Thumbnail:** {has_thumb}\n"
+            f"• **Caption Footer:** `{curr_cap}`\n"
             f"• **Port:** {PORT} (24/7 Alive)\n"
             f"• **Last Activity:** {status_info['last_activity']}\n"
         )
         await send_text_msg(session, chat_id, status_msg)
         return
 
-    # 4. /caption command
+    # 6. /caption command
     if text.startswith("/caption"):
         parts = text.split(maxsplit=1)
         if len(parts) > 1:
             new_caption = parts[1].strip()
             if new_caption.lower() == "reset":
-                if from_id in user_destinations:
-                    del user_destinations[from_id]
+                if f"caption_{from_id}" in user_destinations:
+                    del user_destinations[f"caption_{from_id}"]
                 await send_text_msg(session, chat_id, "✅ Caption footer reset ho gaya default par!")
             else:
                 user_destinations[f"caption_{from_id}"] = new_caption
-                await send_text_msg(session, chat_id, f"✅ Naya caption footer set ho gaya:\n\n`{new_caption}`")
+                await send_text_msg(
+                    session,
+                    chat_id,
+                    f"✅ **Naya Caption Footer Set Ho Gaya!**\n\n`{new_caption}`\n\nAb se har video aur file ke caption ke niche yeh line jud kar aayegi! 🚀"
+                )
         else:
             curr_cap = user_destinations.get(f"caption_{from_id}", CUSTOM_FOOTER or "Default")
             await send_text_msg(
                 session,
                 chat_id,
                 f"✍️ **Current Caption Footer:**\n\n`{curr_cap}`\n\n"
-                "Change karne ke liye: `/caption Aapka Naya Footer`\n"
-                "Reset karne ke liye: `/caption reset`"
+                "📌 **Change karne ke liye:**\n`/caption Aapka Naya Footer Text`\n\n"
+                "📌 **Example:**\n`/caption 👤 By: @YourID | 📢 Channel: @YourChannel`\n\n"
+                "📌 **Reset karne ke liye:**\n`/caption reset`"
             )
         return
 
@@ -509,7 +564,7 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                         continue
 
                     empty_streak = 0  # Reset empty streak on valid message
-                    final_caption = format_caption(target_msg.caption)
+                    final_caption = format_caption(target_msg.caption, from_id)
 
                     if target_msg.media:
                         if status_msg_id and (curr_id % 2 == 0 or saved_count == 0):
@@ -561,7 +616,7 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                             os.remove(file_path)
 
                     elif target_msg.text:
-                        await send_text_msg(session, target_destination, format_caption(target_msg.text))
+                        await send_text_msg(session, target_destination, format_caption(target_msg.text, from_id))
                         saved_count += 1
 
                     await asyncio.sleep(1.5)
@@ -671,7 +726,9 @@ async def bot_polling_loop():
                 {"command": "setchat", "description": "⚙️ Set destination channel ID"},
                 {"command": "clearchat", "description": "🔄 Reset to private chat"},
                 {"command": "stop", "description": "🛑 Stop ongoing batch transfer"},
-                {"command": "caption", "description": "✍️ Custom caption footer"}
+                {"command": "caption", "description": "✍️ Custom caption footer"},
+                {"command": "showthumb", "description": "🖼️ View active thumbnail"},
+                {"command": "delthumb", "description": "🗑️ Delete custom thumbnail"}
             ]
         }
         await call_bot_api(session, "setMyCommands", commands_payload)
