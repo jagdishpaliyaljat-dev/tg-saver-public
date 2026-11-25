@@ -3,18 +3,40 @@ import base64
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 
 # --- Render Port & Health Server ---
 PORT = int(os.environ.get("PORT", "8080"))
 
+bot_status_info = {
+    "bot_connected": False,
+    "bot_username": None,
+    "user_connected": False,
+    "user_name": None,
+    "error": None
+}
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Telegram Restricted Content Saver Bot is Running 24/7!")
+        html = f"""
+        <html>
+        <head><title>Telegram Saver Bot Status</title></head>
+        <body style="font-family: sans-serif; padding: 20px; line-height: 1.6;">
+            <h2>🚀 Telegram Restricted Content Saver Bot</h2>
+            <hr>
+            <p><b>Bot Client:</b> {"✅ Connected (@" + str(bot_status_info['bot_username']) + ")" if bot_status_info['bot_connected'] else "❌ Disconnected / Invalid BOT_TOKEN"}</p>
+            <p><b>User Session:</b> {"✅ Connected (" + str(bot_status_info['user_name']) + ")" if bot_status_info['user_connected'] else "❌ Disconnected"}</p>
+            {"<p style='color:red;'><b>Error:</b> " + str(bot_status_info['error']) + "</p>" if bot_status_info['error'] else ""}
+            <p><b>Server:</b> Running 24/7 on port {PORT}</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode("utf-8"))
 
     def log_message(self, format, *args):
         pass
@@ -28,7 +50,7 @@ threading.Thread(target=run_health_server, daemon=True).start()
 # --- Credentials & Config ---
 API_ID = int(os.environ.get("API_ID", "28220028"))
 API_HASH = os.environ.get("API_HASH", "2644b27a6f3bff5dea5d09e657b01a5f")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip().strip('"').strip("'")
 
 raw_session = os.environ.get(
     "SESSION_STRING",
@@ -42,7 +64,6 @@ if len(decoded) == 270:
 else:
     SESSION_STRING = raw_session
 
-# Optional Destination & Batch settings
 source_val = os.environ.get("SOURCE_CHAT", "-1003863573134")
 try:
     SOURCE_CHAT = int(source_val)
@@ -59,7 +80,6 @@ START_MSG_ID = int(os.environ.get("START_MSG_ID", "1"))
 END_MSG_ID = int(os.environ.get("END_MSG_ID", "3572"))
 AUTO_TRANSFER = os.environ.get("AUTO_TRANSFER", "false").lower() == "true"
 
-# Custom Caption and Thumbnail configuration
 CUSTOM_FOOTER = os.environ.get("CUSTOM_FOOTER", "")
 TELEGRAM_ID = os.environ.get("TELEGRAM_ID", "")
 CHANNEL_MENTION = os.environ.get("CHANNEL_MENTION", "")
@@ -98,22 +118,26 @@ def prepare_thumbnail():
         return CUSTOM_THUMBNAIL_PATH
     return None
 
-# User account client (Restricted content fetch karne ke liye)
+# User client (Always initialized for fetching restricted media)
 user_app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
-# Bot client (Interacting with users in Telegram chat)
-bot_app = None
-if BOT_TOKEN:
-    bot_app = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Bot client (Always initialized to listen for user commands)
+# If BOT_TOKEN is empty in env, we create client conditionally
+bot_app = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) if BOT_TOKEN else None
 
-# --- Interactive Bot Handlers ---
+
+# --- Bot Message Handlers ---
 if bot_app:
     @bot_app.on_message(filters.command("start") & filters.private)
     async def start_command(client, message: Message):
         user_name = message.from_user.first_name if message.from_user else "User"
+        
+        status_line = "✅ **User Session:** Connected" if bot_status_info["user_connected"] else "⚠️ **User Session:** Disconnected"
+        
         welcome_text = (
             f"👋 **Namaste {user_name}!**\n\n"
             "Main **Save Restricted Content Bot** hoon.\n\n"
+            f"{status_line}\n\n"
             "📌 **Kaise use karein:**\n"
             "Mujhe kisi bhi Telegram post ka link bhejo:\n\n"
             "• **Single post:** `https://t.me/c/1234567890/42`\n"
@@ -127,6 +151,10 @@ if bot_app:
         text = message.text.strip()
         if "t.me/" not in text:
             await message.reply_text("❌ Kripya valid Telegram post link bhejein.\nExample: `https://t.me/c/1234567890/100`")
+            return
+
+        if not bot_status_info["user_connected"]:
+            await message.reply_text("⚠️ User session connect nahi hai! Kripya Render logs ya session string check karein.")
             return
 
         status_msg = await message.reply_text("⏳ Processing link...")
@@ -253,26 +281,43 @@ async def start_transfer():
 
 # --- Main Runner ---
 async def main():
-    print("Connecting Telegram User Session...")
-    await user_app.start()
-    print("Telegram User account connected successfully!")
-
-    print("Loading dialogs...")
-    async for _ in user_app.get_dialogs(limit=50):
-        pass
-
+    # 1. Start Bot Client FIRST (guarantees bot is alive and responds to /start)
     if bot_app:
-        print("Starting Interactive Telegram Bot (@BotFather token)...")
-        await bot_app.start()
-        print("Telegram Interactive Bot is LIVE and responding!")
+        try:
+            print("Starting Telegram Bot (@BotFather token)...")
+            await bot_app.start()
+            bot_me = await bot_app.get_me()
+            bot_status_info["bot_connected"] = True
+            bot_status_info["bot_username"] = bot_me.username
+            print(f"✅ Bot successfully started as @{bot_me.username} (ID: {bot_me.id})")
+        except Exception as e:
+            bot_status_info["error"] = f"Bot Start Error: {e}"
+            print(f"❌ Error starting bot_app: {e}")
     else:
-        print("⚠️ NOTE: BOT_TOKEN is not set in Environment Variables.")
-        print("Add BOT_TOKEN in Render to enable interactive chat responses!")
+        print("⚠️ NOTE: BOT_TOKEN is missing or empty in Environment Variables!")
+        print("Render me Environment tab me jakar BOT_TOKEN key zaroor add karein.")
 
-    if AUTO_TRANSFER or not bot_app:
+    # 2. Start User Client (in separate try block so it NEVER crashes bot)
+    try:
+        print("Connecting Telegram User Session...")
+        await user_app.start()
+        user_me = await user_app.get_me()
+        bot_status_info["user_connected"] = True
+        bot_status_info["user_name"] = user_me.first_name
+        print(f"✅ User account connected: {user_me.first_name} (@{user_me.username})")
+        
+        async for _ in user_app.get_dialogs(limit=20):
+            pass
+    except Exception as e:
+        bot_status_info["error"] = f"User Session Error: {e}"
+        print(f"❌ User session failed to connect: {e}")
+        print("Check if SESSION_STRING is valid and account is active.")
+
+    if AUTO_TRANSFER and bot_status_info["user_connected"]:
         asyncio.create_task(start_transfer())
 
-    await asyncio.Event().wait()
+    print("⚡ System is running. Waiting for events...")
+    await idle()
 
 if __name__ == "__main__":
     asyncio.run(main())
