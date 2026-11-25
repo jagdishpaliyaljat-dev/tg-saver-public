@@ -198,15 +198,82 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
             "Main **Save Restricted Content Bot** hoon.\n\n"
             f"⚡ **User Session (Ananya):** {session_status}\n"
             f"🎯 **Active Destination:** {dest_display}\n\n"
-            "📌 **Commands:**\n"
-            "• **Link Bhejo:** `https://t.me/c/3863573134/31`\n"
-            "• **Range Bhejo:** `https://t.me/c/3863573134/31-35`\n"
-            "• `/channels` - Check karein Ananya account kin channels me joined hai\n"
-            "• `/setchat -100xxxxxxxxxx` - Manually channel ID set karein\n"
-            "• `/clearchat` - Wapas private chat me paane ke liye\n"
-            "• `/mychat` - Check karein active destination channel"
+            "📌 **Commands Menu:**\n"
+            "• `/help` - Bot use karne ka poora guide\n"
+            "• `/channels` - Ananya account ke joined channels\n"
+            "• `/status` - Bot aur server status\n"
+            "• `/mychat` - Active destination channel dekhein\n"
+            "• `/setchat <ID>` - Manually channel ID set karein\n"
+            "• `/clearchat` - Private chat me reset karein\n"
+            "• `/caption` - Custom caption footer set karein\n\n"
+            "🔗 **Direct Link Bhejein:**\n"
+            "• `https://t.me/c/3863573134/31` (Single)\n"
+            "• `https://t.me/c/3863573134/31-35` (Range)"
         )
         await send_text_msg(session, chat_id, welcome_text)
+        return
+
+    # 2. /help command
+    if text.startswith("/help"):
+        help_text = (
+            "📖 **Telegram Restricted Content Saver Guide:**\n\n"
+            "1️⃣ **Restricted Files Save Karna:**\n"
+            "• Kisi bhi restricted channel ka post link copy karein aur mujhe bhej dein.\n"
+            "• Example: `https://t.me/c/3863573134/31`\n\n"
+            "2️⃣ **Multiple Files Ek Sath (Range):**\n"
+            "• Link ke aage hyphen `-` lagakar range daalein.\n"
+            "• Example: `https://t.me/c/3863573134/31-35`\n\n"
+            "3️⃣ **Channel/Group me Upload Karna:**\n"
+            "• Bot ko apne channel/group me **Admin** banayein.\n"
+            "• Ya channel ka koi bhi 1 message mujhe **Forward** karein.\n"
+            "• Ya `/setchat -100xxxxxxxxxx` likhein.\n\n"
+            "4️⃣ **Commands:**\n"
+            "• `/channels` - Check karein Ananya account kin channels me hai\n"
+            "• `/status` - Live server aur connection status\n"
+            "• `/mychat` - Active target channel\n"
+            "• `/clearchat` - Wapas private chat me paane ke liye\n"
+            "• `/caption <text>` - Naya caption footer set karein"
+        )
+        await send_text_msg(session, chat_id, help_text)
+        return
+
+    # 3. /status command
+    if text.startswith("/status"):
+        session_status = "✅ Connected (Ananya)" if status_info["user_connected"] else "❌ Disconnected"
+        curr_dest = user_destinations.get(from_id, DEFAULT_DESTINATION)
+        dest_display = f"`{curr_dest}`" if curr_dest else "Private Chat"
+        status_msg = (
+            "⚡ **Live System Status:**\n\n"
+            f"• **Bot Client:** ✅ Active (@{status_info['bot_name']})\n"
+            f"• **User Account:** {session_status}\n"
+            f"• **Active Destination:** {dest_display}\n"
+            f"• **Port:** {PORT} (24/7 Alive)\n"
+            f"• **Last Activity:** {status_info['last_activity']}\n"
+        )
+        await send_text_msg(session, chat_id, status_msg)
+        return
+
+    # 4. /caption command
+    if text.startswith("/caption"):
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1:
+            new_caption = parts[1].strip()
+            if new_caption.lower() == "reset":
+                if from_id in user_destinations:
+                    del user_destinations[from_id]
+                await send_text_msg(session, chat_id, "✅ Caption footer reset ho gaya default par!")
+            else:
+                user_destinations[f"caption_{from_id}"] = new_caption
+                await send_text_msg(session, chat_id, f"✅ Naya caption footer set ho gaya:\n\n`{new_caption}`")
+        else:
+            curr_cap = user_destinations.get(f"caption_{from_id}", CUSTOM_FOOTER or "Default")
+            await send_text_msg(
+                session,
+                chat_id,
+                f"✍️ **Current Caption Footer:**\n\n`{curr_cap}`\n\n"
+                "Change karne ke liye: `/caption Aapka Naya Footer`\n"
+                "Reset karne ke liye: `/caption reset`"
+            )
         return
 
     # 2. /channels command (Lists all channels Ananya account is joined in)
@@ -437,6 +504,21 @@ async def bot_polling_loop():
         if me_resp and me_resp.get("ok"):
             status_info["bot_name"] = me_resp["result"]["username"]
             print(f"✅ Bot API Poller connected as @{status_info['bot_name']}")
+
+        # Register official command menu with Telegram UI
+        commands_payload = {
+            "commands": [
+                {"command": "start", "description": "🚀 Bot start & info"},
+                {"command": "help", "description": "📖 Usage guide & examples"},
+                {"command": "channels", "description": "📋 Joined channels list"},
+                {"command": "status", "description": "⚡ Bot & server status"},
+                {"command": "mychat", "description": "🎯 Active destination channel"},
+                {"command": "setchat", "description": "⚙️ Set destination channel ID"},
+                {"command": "clearchat", "description": "🔄 Reset to private chat"},
+                {"command": "caption", "description": "✍️ Custom caption footer"}
+            ]
+        }
+        await call_bot_api(session, "setMyCommands", commands_payload)
 
         while True:
             try:
