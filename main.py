@@ -150,7 +150,6 @@ async def get_target_message_safe(chat_id, msg_id):
         return await user_app.get_messages(chat_id, msg_id)
     except Exception as e:
         print(f"Initial get_messages for {chat_id} msg {msg_id} failed: {e}. Resolving peer cache...")
-        # Populate peer cache by scanning dialogs
         try:
             async for dialog in user_app.get_dialogs(limit=50):
                 if dialog.chat and dialog.chat.id == chat_id:
@@ -158,6 +157,94 @@ async def get_target_message_safe(chat_id, msg_id):
         except Exception as d_err:
             print(f"Dialog cache scan error: {d_err}")
         return await user_app.get_messages(chat_id, msg_id)
+
+
+# Bulletproof Media Upload with Fast HTTP and Live Progress
+async def upload_media_file(session: aiohttp.ClientSession, target_chat_id: int, file_path: str, media_type: str, caption: str, thumb_file: str, status_msg_id: int, user_chat_id: int):
+    file_size = os.path.getsize(file_path)
+    file_size_mb = file_size / (1024 * 1024)
+    print(f"Uploading {media_type} ({file_size_mb:.2f} MB) to {target_chat_id}...")
+
+    # Strategy 1: Files <= 49 MB use Fast HTTP Bot API (instant, no MTProto CPU slowdown)
+    if file_size_mb <= 49.0:
+        try:
+            method_map = {
+                "video": "sendVideo",
+                "photo": "sendPhoto",
+                "audio": "sendAudio",
+                "voice": "sendVoice",
+                "document": "sendDocument"
+            }
+            method = method_map.get(media_type, "sendDocument")
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(target_chat_id))
+            if caption:
+                form.add_field("caption", caption)
+                form.add_field("parse_mode", "Markdown")
+
+            field_name = "video" if media_type == "video" else ("photo" if media_type == "photo" else ("audio" if media_type == "audio" else ("voice" if media_type == "voice" else "document")))
+            form.add_field(field_name, open(file_path, "rb"), filename=os.path.basename(file_path))
+
+            if thumb_file and os.path.exists(thumb_file) and media_type in ["video", "document"]:
+                form.add_field("thumb", open(thumb_file, "rb"), filename="thumb.jpg")
+
+            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                res_data = await resp.json()
+                if res_data and res_data.get("ok"):
+                    print("✅ Fast HTTP Bot API upload succeeded!")
+                    return True
+                else:
+                    print(f"HTTP upload non-ok: {res_data}. Trying Pyrogram...")
+        except Exception as http_err:
+            print(f"HTTP upload error: {http_err}. Trying Pyrogram...")
+
+    # Strategy 2: Pyrogram Upload with Live Progress Bar (for files up to 2 GB)
+    last_update = [0]
+    async def progress_cb(current, total):
+        now = asyncio.get_event_loop().time()
+        if now - last_update[0] >= 3.0:
+            last_update[0] = now
+            pct = int((current / total) * 100) if total > 0 else 0
+            c_mb = current / (1024 * 1024)
+            t_mb = total / (1024 * 1024)
+            if status_msg_id:
+                try:
+                    await edit_text_msg(
+                        session,
+                        user_chat_id,
+                        status_msg_id,
+                        f"📤 **Uploading:** `{pct}%` (`{c_mb:.1f} MB / {t_mb:.1f} MB`)\n\n✋ *Rukne ke liye /stop likhein.*"
+                    )
+                except Exception:
+                    pass
+
+    client_to_use = bot_app if (bot_app and bot_app.is_connected) else user_app
+    try:
+        if media_type == "video":
+            await client_to_use.send_video(target_chat_id, video=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
+        elif media_type == "document":
+            await client_to_use.send_document(target_chat_id, document=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
+        elif media_type == "photo":
+            await client_to_use.send_photo(target_chat_id, photo=file_path, caption=caption, progress=progress_cb)
+        elif media_type == "audio":
+            await client_to_use.send_audio(target_chat_id, audio=file_path, caption=caption, progress=progress_cb)
+        elif media_type == "voice":
+            await client_to_use.send_voice(target_chat_id, voice=file_path, caption=caption)
+        return True
+    except Exception as e:
+        print(f"Primary upload client failed: {e}. Trying fallback client...")
+        alt_client = user_app if client_to_use == bot_app else bot_app
+        if alt_client and alt_client.is_connected:
+            if media_type == "video":
+                await alt_client.send_video(target_chat_id, video=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
+            elif media_type == "document":
+                await alt_client.send_document(target_chat_id, document=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
+            elif media_type == "photo":
+                await alt_client.send_photo(target_chat_id, photo=file_path, caption=caption)
+            return True
+        raise e
 
 
 # --- Handle Incoming Message ---
@@ -439,30 +526,39 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                             last_err_detail = f"Message {curr_id} media download fail hua."
                             continue
 
-                        # Upload to target destination via bot_app (or user_app fallback)
+                        # Determine media type
+                        if target_msg.video:
+                            m_type = "video"
+                        elif target_msg.photo:
+                            m_type = "photo"
+                        elif target_msg.audio:
+                            m_type = "audio"
+                        elif target_msg.voice:
+                            m_type = "voice"
+                        else:
+                            m_type = "document"
+
+                        # Upload to target destination using Fast HTTP or Pyrogram
                         try:
-                            if target_msg.video:
-                                await bot_app.send_video(target_destination, video=file_path, caption=final_caption, thumb=thumb_file)
-                            elif target_msg.document:
-                                await bot_app.send_document(target_destination, document=file_path, caption=final_caption, thumb=thumb_file)
-                            elif target_msg.photo:
-                                await bot_app.send_photo(target_destination, photo=file_path, caption=final_caption)
-                            elif target_msg.audio:
-                                await bot_app.send_audio(target_destination, audio=file_path, caption=final_caption)
-                            elif target_msg.voice:
-                                await bot_app.send_voice(target_destination, voice=file_path, caption=final_caption)
+                            await upload_media_file(
+                                session=session,
+                                target_chat_id=target_destination,
+                                file_path=file_path,
+                                media_type=m_type,
+                                caption=final_caption,
+                                thumb_file=thumb_file,
+                                status_msg_id=status_msg_id,
+                                user_chat_id=chat_id
+                            )
+                            saved_count += 1
                         except Exception as upload_err:
-                            print(f"bot_app upload error: {upload_err}. Trying user_app upload...")
-                            if target_msg.video:
-                                await user_app.send_video(target_destination, video=file_path, caption=final_caption, thumb=thumb_file)
-                            elif target_msg.document:
-                                await user_app.send_document(target_destination, document=file_path, caption=final_caption, thumb=thumb_file)
-                            elif target_msg.photo:
-                                await user_app.send_photo(target_destination, photo=file_path, caption=final_caption)
+                            last_err_detail = f"Upload error: {upload_err}"
+                            print(f"Upload error on msg {curr_id}: {upload_err}")
+                            if status_msg_id:
+                                await edit_text_msg(session, chat_id, status_msg_id, f"⚠️ Message {curr_id} upload fail: `{upload_err}`")
 
                         if os.path.exists(file_path):
                             os.remove(file_path)
-                        saved_count += 1
 
                     elif target_msg.text:
                         await send_text_msg(session, target_destination, format_caption(target_msg.text))
