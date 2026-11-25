@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import math
 import base64
 import asyncio
@@ -178,80 +179,24 @@ async def get_target_message_safe(chat_id, msg_id):
         return await user_app.get_messages(chat_id, msg_id)
 
 
-# --- 6X Ultra Fast Parallel Uploader Engine ---
-async def fast_upload_file(client, file_path, progress_cb=None):
-    file_size = os.path.getsize(file_path)
-    part_size = 512 * 1024  # 512 KB standard MTProto part size
-    total_parts = math.ceil(file_size / part_size)
-    is_big = file_size > 10 * 1024 * 1024
-    file_id = client.rnd_id()
-
-    semaphore = asyncio.Semaphore(6)  # 6 Parallel Upload Connections!
-    uploaded_bytes = 0
-
-    async def upload_part(part_index, chunk):
-        nonlocal uploaded_bytes
-        async with semaphore:
-            for attempt in range(3):
-                try:
-                    if is_big:
-                        await client.invoke(
-                            raw.functions.upload.SaveBigFilePart(
-                                file_id=file_id,
-                                file_part=part_index,
-                                file_total_parts=total_parts,
-                                bytes=chunk
-                            )
-                        )
-                    else:
-                        await client.invoke(
-                            raw.functions.upload.SaveFilePart(
-                                file_id=file_id,
-                                file_part=part_index,
-                                bytes=chunk
-                            )
-                        )
-                    uploaded_bytes += len(chunk)
-                    if progress_cb:
-                        await progress_cb(uploaded_bytes, file_size)
-                    break
-                except FloodWait as fw:
-                    await asyncio.sleep(fw.value + 1)
-                except Exception as part_err:
-                    if attempt == 2:
-                        raise part_err
-                    await asyncio.sleep(1)
-
-    tasks = []
-    with open(file_path, "rb") as f:
-        for part_index in range(total_parts):
-            chunk = f.read(part_size)
-            tasks.append(upload_part(part_index, chunk))
-
-    await asyncio.gather(*tasks)
-
-    if is_big:
-        return raw.types.InputFileBig(
-            id=file_id,
-            parts=total_parts,
-            name=os.path.basename(file_path)
-        )
-    else:
-        return raw.types.InputFile(
-            id=file_id,
-            parts=total_parts,
-            name=os.path.basename(file_path),
-            md5_checksum=""
-        )
-
-
-# Bulletproof Media Upload with Fast HTTP, 6X Parallel MTProto and Live Progress
-async def upload_media_file(session: aiohttp.ClientSession, target_chat_id: int, file_path: str, media_type: str, caption: str, thumb_file: str, status_msg_id: int, user_chat_id: int):
+# --- High-Speed Hardware-Accelerated Media Upload (up to 2 GB) ---
+async def upload_media_file(
+    session: aiohttp.ClientSession,
+    target_chat_id: int,
+    file_path: str,
+    media_type: str,
+    caption: str,
+    thumb_file: str,
+    status_msg_id: int,
+    user_chat_id: int,
+    curr_id: int = 0,
+    end_id: int = 0
+):
     file_size = os.path.getsize(file_path)
     file_size_mb = file_size / (1024 * 1024)
     print(f"Uploading {media_type} ({file_size_mb:.2f} MB) to {target_chat_id}...")
 
-    # Strategy 1: Files <= 49 MB use Fast HTTP Bot API (instant, no MTProto CPU slowdown)
+    # Strategy 1: Files <= 49 MB use Fast HTTP Bot API (instant, bypasses MTProto)
     if file_size_mb <= 49.0:
         try:
             method_map = {
@@ -282,54 +227,109 @@ async def upload_media_file(session: aiohttp.ClientSession, target_chat_id: int,
                     print("✅ Fast HTTP Bot API upload succeeded!")
                     return True
                 else:
-                    print(f"HTTP upload non-ok: {res_data}. Trying Pyrogram 6X Parallel...")
+                    print(f"HTTP upload non-ok: {res_data}. Trying Pyrogram MTProto...")
         except Exception as http_err:
-            print(f"HTTP upload error: {http_err}. Trying Pyrogram 6X Parallel...")
+            print(f"HTTP upload error: {http_err}. Trying Pyrogram MTProto...")
 
-    # Strategy 2: Ultra Fast 6-Worker Parallel MTProto Upload (up to 2 GB)
+    # Strategy 2: Ultra Fast Hardware-Accelerated MTProto Stream Upload (up to 2 GB)
+    start_up = time.time()
     last_update = [0]
+
     async def progress_cb(current, total):
-        now = asyncio.get_event_loop().time()
+        now = time.time()
         if now - last_update[0] >= 3.0:
             last_update[0] = now
             pct = int((current / total) * 100) if total > 0 else 0
             c_mb = current / (1024 * 1024)
             t_mb = total / (1024 * 1024)
+            elapsed = now - start_up
+            speed_mb = (c_mb / elapsed) if elapsed > 0 else 0
+            eta_sec = int((t_mb - c_mb) / speed_mb) if speed_mb > 0 else 0
+
+            header = f"📤 **Uploading Msg [{curr_id}/{end_id}]:** `{pct}%`" if curr_id else f"📤 **Uploading Media:** `{pct}%`"
             if status_msg_id:
-                # Non-blocking async edit
                 asyncio.create_task(edit_text_msg(
                     session,
                     user_chat_id,
                     status_msg_id,
-                    f"⚡ **Fast 6X Uploading:** `{pct}%` (`{c_mb:.1f} MB / {t_mb:.1f} MB`)\n\n✋ *Rukne ke liye /stop likhein.*"
+                    f"{header}\n"
+                    f"📊 **Size:** `{c_mb:.1f} MB / {t_mb:.1f} MB`\n"
+                    f"⚡ **Speed:** `{speed_mb:.1f} MB/s` | ⏳ **ETA:** `{eta_sec}s`\n"
+                    f"🎯 **Target:** `{target_chat_id}`\n\n"
+                    f"✋ *Rukne ke liye* **/stop** *likhein.*"
                 ))
 
-    client_to_use = bot_app if (bot_app and bot_app.is_connected) else user_app
-    try:
-        # Fast 6-Worker parallel chunk upload
-        input_file = await fast_upload_file(client_to_use, file_path, progress_cb=progress_cb)
+    # Determine clients to try: prefer bot_app, fallback to user_app (or vice versa)
+    clients_to_try = []
+    if bot_app and bot_app.is_connected:
+        clients_to_try.append(bot_app)
+    if user_app and user_app.is_connected and user_app not in clients_to_try:
+        clients_to_try.append(user_app)
 
-        if media_type == "video":
-            await client_to_use.send_video(target_chat_id, video=input_file, caption=caption, thumb=thumb_file)
-        elif media_type == "document":
-            await client_to_use.send_document(target_chat_id, document=input_file, caption=caption, thumb=thumb_file)
-        elif media_type == "photo":
-            await client_to_use.send_photo(target_chat_id, photo=input_file, caption=caption)
-        elif media_type == "audio":
-            await client_to_use.send_audio(target_chat_id, audio=input_file, caption=caption)
-        elif media_type == "voice":
-            await client_to_use.send_voice(target_chat_id, voice=input_file, caption=caption)
-        return True
-    except Exception as fast_err:
-        print(f"Parallel upload warning: {fast_err}. Falling back to standard Pyrogram send...")
-        # Fallback to standard Pyrogram client send
-        if media_type == "video":
-            await client_to_use.send_video(target_chat_id, video=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
-        elif media_type == "document":
-            await client_to_use.send_document(target_chat_id, document=file_path, caption=caption, thumb=thumb_file, progress=progress_cb)
-        elif media_type == "photo":
-            await client_to_use.send_photo(target_chat_id, photo=file_path, caption=caption)
-        return True
+    if not clients_to_try:
+        raise RuntimeError("No connected Pyrogram client available for upload!")
+
+    last_exc = None
+    for client in clients_to_try:
+        try:
+            print(f"Attempting upload via {client.name}...")
+            thumb_arg = thumb_file if (thumb_file and os.path.exists(thumb_file)) else None
+            if media_type == "video":
+                await client.send_video(
+                    target_chat_id,
+                    video=file_path,
+                    caption=caption,
+                    thumb=thumb_arg,
+                    supports_streaming=True,
+                    progress=progress_cb
+                )
+            elif media_type == "document":
+                await client.send_document(
+                    target_chat_id,
+                    document=file_path,
+                    caption=caption,
+                    thumb=thumb_arg,
+                    progress=progress_cb
+                )
+            elif media_type == "photo":
+                await client.send_photo(
+                    target_chat_id,
+                    photo=file_path,
+                    caption=caption,
+                    progress=progress_cb
+                )
+            elif media_type == "audio":
+                await client.send_audio(
+                    target_chat_id,
+                    audio=file_path,
+                    caption=caption,
+                    thumb=thumb_arg,
+                    progress=progress_cb
+                )
+            elif media_type == "voice":
+                await client.send_voice(
+                    target_chat_id,
+                    voice=file_path,
+                    caption=caption,
+                    progress=progress_cb
+                )
+            else:
+                await client.send_document(
+                    target_chat_id,
+                    document=file_path,
+                    caption=caption,
+                    thumb=thumb_arg,
+                    progress=progress_cb
+                )
+            print(f"✅ Successfully uploaded via {client.name}!")
+            return True
+        except Exception as e:
+            print(f"⚠️ Upload via {client.name} failed: {e}")
+            last_exc = e
+
+    if last_exc:
+        raise last_exc
+    return False
 
 
 # --- Handle Incoming Message ---
@@ -651,16 +651,32 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                     final_caption = format_caption(target_msg.caption, from_id)
 
                     if target_msg.media:
-                        if status_msg_id and (curr_id % 2 == 0 or saved_count == 0):
-                            progress_text = (
-                                f"📥 **Downloading Msg [{curr_id}/{end_id}]...**\n"
-                                f"📦 Transferred: `{saved_count} files`\n"
-                                f"🎯 Upload to: {dest_name}\n\n"
-                                f"✋ *Rukne ke liye* **/stop** *likhein.*"
-                            )
-                            await edit_text_msg(session, chat_id, status_msg_id, progress_text)
+                        start_dl = time.time()
+                        last_dl_time = [0]
 
-                        file_path = await user_app.download_media(target_msg)
+                        async def dl_progress(current, total):
+                            now = time.time()
+                            if now - last_dl_time[0] >= 3.0:
+                                last_dl_time[0] = now
+                                pct = int((current / total) * 100) if total > 0 else 0
+                                c_mb = current / (1024 * 1024)
+                                t_mb = total / (1024 * 1024)
+                                elapsed = now - start_dl
+                                speed = (c_mb / elapsed) if elapsed > 0 else 0
+                                eta = int((t_mb - c_mb) / speed) if speed > 0 else 0
+                                if status_msg_id:
+                                    asyncio.create_task(edit_text_msg(
+                                        session,
+                                        chat_id,
+                                        status_msg_id,
+                                        f"📥 **Downloading Msg [{curr_id}/{end_id}]**\n"
+                                        f"📊 **Progress:** `{pct}%` (`{c_mb:.1f} MB / {t_mb:.1f} MB`)\n"
+                                        f"⚡ **Speed:** `{speed:.1f} MB/s` | ⏳ **ETA:** `{eta}s`\n"
+                                        f"🎯 **Upload to:** {dest_name}\n\n"
+                                        f"✋ *Rukne ke liye* **/stop** *likhein.*"
+                                    ))
+
+                        file_path = await user_app.download_media(target_msg, progress=dl_progress)
                         if not file_path:
                             last_err_detail = f"Message {curr_id} media download fail hua."
                             continue
@@ -687,7 +703,9 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                                 caption=final_caption,
                                 thumb_file=thumb_file,
                                 status_msg_id=status_msg_id,
-                                user_chat_id=chat_id
+                                user_chat_id=chat_id,
+                                curr_id=curr_id,
+                                end_id=end_id
                             )
                             saved_count += 1
                         except Exception as upload_err:
