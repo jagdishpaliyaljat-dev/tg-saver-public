@@ -21,6 +21,7 @@ except RuntimeError:
 PORT = int(os.environ.get("PORT", "8080"))
 
 status_info = {
+    "version": "v3.0 (Live Progress & Streaming Direct Boost)",
     "bot_name": None,
     "user_name": None,
     "user_connected": False,
@@ -47,6 +48,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         <body style="font-family: sans-serif; padding: 20px; line-height: 1.6;">
             <h2>🚀 Telegram Restricted Content Saver Bot</h2>
             <hr>
+            <p><b>Engine Version:</b> {status_info['version']}</p>
             <p><b>Bot Status:</b> {"✅ Active (@" + str(status_info['bot_name']) + ")" if status_info['bot_name'] else "⏳ Connecting..."}</p>
             <p><b>User Session:</b> {"✅ Connected (" + str(status_info['user_name']) + ")" if status_info['user_connected'] else "❌ Disconnected"}</p>
             <p><b>Speed Acceleration:</b> {status_info['tgcrypto']}</p>
