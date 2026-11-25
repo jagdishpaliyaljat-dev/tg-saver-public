@@ -72,6 +72,7 @@ except ValueError:
     DEFAULT_DESTINATION = default_dest
 
 user_destinations = {}
+stop_batch_flags = {}
 
 # Caption & Thumbnail config
 CUSTOM_FOOTER = os.environ.get("CUSTOM_FOOTER", "")
@@ -332,15 +333,22 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
         await send_text_msg(session, chat_id, "✅ Destination reset ho gaya! Ab files aapki Private Chat me aayengi.")
         return
 
-    # 6. Telegram Link handler
+    # 6. /stop command (Stops active continuous batch)
+    if text.startswith("/stop"):
+        stop_batch_flags[from_id] = True
+        await send_text_msg(session, chat_id, "🛑 **Batch transfer rokne ka signal bhej diya gaya hai!**\nAbhi process ho rahi file ke baad transfer stop ho jayega.")
+        return
+
+    # 7. Telegram Link handler (Auto Continuous Batch Forwarding)
     if "t.me/" in text:
         if not status_info["user_connected"]:
             await send_text_msg(session, chat_id, "⚠️ User session abhi connect nahi hai. Kripya thoda wait karein ya logs check karein.")
             return
 
         target_destination = user_destinations.get(from_id, DEFAULT_DESTINATION or chat_id)
+        stop_batch_flags[from_id] = False
 
-        resp = await send_text_msg(session, chat_id, "⏳ **Link process ho raha hai...**")
+        resp = await send_text_msg(session, chat_id, "⏳ **Channel detect ho raha hai aur batch taiyar ho raha hai...**")
         status_msg_id = resp.get("result", {}).get("message_id") if resp else None
 
         thumb_file = prepare_thumbnail()
@@ -350,52 +358,88 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
             parts = clean_text.split("/")
             last_part = parts[-1]
 
-            if "-" in last_part:
-                start_id, end_id = map(int, last_part.split("-"))
-            else:
-                start_id = end_id = int(last_part)
-
             if "/c/" in clean_text:
                 source_chat_id = int("-100" + parts[-2])
             else:
                 source_chat_id = parts[-2]
 
-            total_msgs = (end_id - start_id) + 1
-            if total_msgs > 100:
-                if status_msg_id:
-                    await edit_text_msg(session, chat_id, status_msg_id, "⚠️ Ek baar me maximum 100 messages hi save kar sakte hain!")
-                return
+            # Check if user specified a manual range (e.g. 10-50) or single starting link
+            if "-" in last_part:
+                start_id, end_id = map(int, last_part.split("-"))
+                is_auto_continuous = False
+            else:
+                start_id = int(last_part)
+                is_auto_continuous = True
+                
+                # Automatically detect the latest message ID in this channel
+                latest_id = None
+                try:
+                    async for m in user_app.get_chat_history(source_chat_id, limit=1):
+                        latest_id = m.id
+                except Exception as hist_err:
+                    print(f"History lookup error: {hist_err}")
+
+                if latest_id and latest_id >= start_id:
+                    end_id = latest_id
+                else:
+                    end_id = start_id + 3000  # Will auto-stop when channel ends
+
+            dest_name = f"Channel (`{target_destination}`)" if target_destination != chat_id else "Private Chat"
+            initial_text = (
+                f"🚀 **Continuous Batch Transfer Shuru!**\n\n"
+                f"📌 **Start Message:** `{start_id}`\n"
+                f"🎯 **Target Message:** `{end_id}`\n"
+                f"📤 **Upload Destination:** {dest_name}\n\n"
+                f"✋ *Transfer kisi bhi waqt rokne ke liye* **/stop** *likhein.*"
+            )
+            if status_msg_id:
+                await edit_text_msg(session, chat_id, status_msg_id, initial_text)
 
             saved_count = 0
+            empty_streak = 0
             last_err_detail = None
+            stopped_by_user = False
 
             for curr_id in range(start_id, end_id + 1):
-                try:
-                    status_text = f"📥 **Downloading message [{curr_id}/{end_id}]...**" if total_msgs > 1 else "📥 **Restricted file download ho rahi hai...**"
-                    if status_msg_id:
-                        await edit_text_msg(session, chat_id, status_msg_id, status_text)
+                # 1. Check if user sent /stop command
+                if stop_batch_flags.get(from_id):
+                    stopped_by_user = True
+                    print(f"Batch stopped by user {from_id} at msg {curr_id}")
+                    break
 
+                # 2. Check empty streak (channel ended)
+                if empty_streak >= 30:
+                    print(f"30 consecutive empty messages. Reached end of channel at {curr_id}.")
+                    break
+
+                try:
                     # Fetch message safely with peer caching
                     target_msg = await get_target_message_safe(source_chat_id, curr_id)
                     
                     if not target_msg or target_msg.empty:
+                        empty_streak += 1
                         last_err_detail = f"Message #{curr_id} empty hai ya delete ho chuka hai."
-                        print(f"Message {curr_id} is empty or not found.")
                         continue
 
+                    empty_streak = 0  # Reset empty streak on valid message
                     final_caption = format_caption(target_msg.caption)
 
                     if target_msg.media:
+                        if status_msg_id and (curr_id % 2 == 0 or saved_count == 0):
+                            progress_text = (
+                                f"📥 **Downloading Msg [{curr_id}/{end_id}]...**\n"
+                                f"📦 Transferred: `{saved_count} files`\n"
+                                f"🎯 Upload to: {dest_name}\n\n"
+                                f"✋ *Rukne ke liye* **/stop** *likhein.*"
+                            )
+                            await edit_text_msg(session, chat_id, status_msg_id, progress_text)
+
                         file_path = await user_app.download_media(target_msg)
                         if not file_path:
-                            last_err_detail = "Media download fail ho gaya."
+                            last_err_detail = f"Message {curr_id} media download fail hua."
                             continue
 
-                        dest_label = f"Channel (`{target_destination}`)" if target_destination != chat_id else "Aapki chat"
-                        if status_msg_id:
-                            await edit_text_msg(session, chat_id, status_msg_id, f"📤 **{dest_label} me upload ho raha hai...**")
-
-                        # Send to target destination via bot_app (or user_app fallback)
+                        # Upload to target destination via bot_app (or user_app fallback)
                         try:
                             if target_msg.video:
                                 await bot_app.send_video(target_destination, video=file_path, caption=final_caption, thumb=thumb_file)
@@ -424,10 +468,10 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                         await send_text_msg(session, target_destination, format_caption(target_msg.text))
                         saved_count += 1
 
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.5)
 
                 except FloodWait as fw:
-                    wait_sec = fw.value + 2
+                    wait_sec = fw.value + 3
                     if status_msg_id:
                         await edit_text_msg(session, chat_id, status_msg_id, f"⏳ Telegram FloodWait: {wait_sec}s wait kar rahe hain...")
                     await asyncio.sleep(wait_sec)
@@ -435,12 +479,27 @@ async def handle_message(session: aiohttp.ClientSession, msg: dict):
                     last_err_detail = str(inner_err)
                     print(f"Error on msg {curr_id}: {inner_err}")
 
-            if saved_count > 0:
+            # Batch finished or stopped
+            if stopped_by_user:
                 if status_msg_id:
-                    if target_destination != chat_id:
-                        await edit_text_msg(session, chat_id, status_msg_id, f"✅ **{saved_count} file(s) aapke destination channel me safaltapoorvak upload ho gayi hain!** 🚀")
-                    else:
-                        await call_bot_api(session, "deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
+                    await edit_text_msg(
+                        session,
+                        chat_id,
+                        status_msg_id,
+                        f"🛑 **Batch Transfer Rok Diya Gaya!**\n\n"
+                        f"📦 Total **{saved_count} file(s)** safaltapoorvak {dest_name} me bhej di gayi hain."
+                    )
+            elif saved_count > 0:
+                if status_msg_id:
+                    await edit_text_msg(
+                        session,
+                        chat_id,
+                        status_msg_id,
+                        f"🎉 **Complete Chat Transfer Ho Gayi Hai!** 🚀\n\n"
+                        f"📌 Start: Message `{start_id}`\n"
+                        f"📦 Total Transferred: **{saved_count} file(s)**\n"
+                        f"🎯 Destination: {dest_name}"
+                    )
             else:
                 if status_msg_id:
                     err_upper = (last_err_detail or "").upper()
@@ -515,6 +574,7 @@ async def bot_polling_loop():
                 {"command": "mychat", "description": "🎯 Active destination channel"},
                 {"command": "setchat", "description": "⚙️ Set destination channel ID"},
                 {"command": "clearchat", "description": "🔄 Reset to private chat"},
+                {"command": "stop", "description": "🛑 Stop ongoing batch transfer"},
                 {"command": "caption", "description": "✍️ Custom caption footer"}
             ]
         }
